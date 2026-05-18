@@ -1,0 +1,22 @@
+id: "AMPEnv"
+type: "gym:cpu"
+num_envs: 32
+seed: 0
+
+kwargs:
+  model_path: "moveitmoveit/data/humanoid/humanoid.xml"
+  motion_clips:
+    - "/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_humanoid/humanoid_jog.npz"
+  params:
+    max_episode_time: 10.0
+    sim_freq: 120.0
+    control_freq: 30.0
+    num_disc_obs_steps: 10
+
+    tracking_sigma: 1.0
+    tracking_root_pos_weight: 0.15
+    tracking_root_rot_weight: 0.15
+    tracking_root_vel_weight: 0.10
+    tracking_joint_rot_weight: 0.20
+    tracking_dof_vel_weight: 0.05
+    tracking_ee_pos_weight: 0.10

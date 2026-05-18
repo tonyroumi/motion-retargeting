@@ -1,0 +1,24 @@
+actor:
+  hidden_layers: [1024, 512]
+  activation: relu
+  ortho_init: true
+  noise_std_type: fixed
+  init_noise_std: 0.05
+
+critic:
+  hidden_layers: [1024, 512]
+  activation: relu
+
+discriminator:
+  hidden_layers: [1024, 512]
+  activation: relu
+
+obs_norm:
+  clip: 5.0
+  max_samples: 100000000
+
+disc_obs_norm:
+  clip: 5.0
+  max_samples: 100000000
+
+action_norm: {}

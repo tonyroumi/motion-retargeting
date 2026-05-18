@@ -7,18 +7,16 @@ import numpy as np
 
 from moveitmoveit.src.sim import Skeleton
 import moveitmoveit.src.transforms as transforms
-from utils import Logger
 
-from .motion_clip import MotionClip
-#TODO would it be faster if clips were already on gpu then when i sample for the start state make then np for mujoco?
+from .clip import MotionClip
+
 class MotionLibrary:
     """ Collection of motion clips with weighted random sampling. """
 
     def __init__(
         self,
         srcs: List[str],
-        skeleton: Skeleton,
-        logger: Logger,
+        skeleton: Skeleton
     ) -> None:
         self._clips: List[MotionClip] = [MotionClip.load(src) for src in srcs]
 
@@ -28,7 +26,6 @@ class MotionLibrary:
         self._weights = w / w.sum()
 
         self._skeleton = skeleton
-        self.logger = logger
 
         self._load()
 
@@ -58,10 +55,8 @@ class MotionLibrary:
 
             root_pos = clip.root_pos
             root_rot = clip.root_rot
-            root_rot = transforms.quat_pos(root_rot)
             joint_dof = clip.frames
             joint_rot = self._skeleton.dof_to_rot(clip.frames)
-            joint_rot = transforms.quat_pos(joint_rot)
             body_pos = clip.body_pos
 
             root_pos_delta = root_pos[-1, :] - root_pos[0, :]
@@ -99,8 +94,6 @@ class MotionLibrary:
         self._frame_dof_vel = np.concatenate(frame_dof_vel, axis=0)
 
         self._motion_ids = np.arange(self.num_clips)
-
-        self.logger.info(f"Loaded {len(self._clips)} motions with a total length of {total_length}")
 
     @property
     def num_clips(self) -> int:
@@ -206,54 +199,19 @@ class MotionLibrary:
 
         return root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, body_pos
 
-
-    # def calculate_motion_frame(self, motion_ids, motion_times):
-
-    #     number_frames = self._motion_num_frames[motion_ids]
-    #     motion_lengths = self._motion_lengths[motion_ids]
-
-    #     phase = motion_times / motion_lengths
-    #     phase = phase - np.floor(phase)
-    #     phase = np.clip(phase, 0.0, 1.0)
-
-    #     frame_idx0 = np.long((phase * (number_frames - 1)))
-    #     frame_idx1 = np.minimum(frame_idx0 + 1, number_frames - 1)
-    #     blend = phase * (number_frames - 1) - frame_idx0
-
-    #     root_pos0 = self._frame_root_pos[frame_idx0]
-    #     root_pos1 = self._frame_root_pos[frame_idx1]
-        
-    #     root_rot0 = self._frame_root_rot[frame_idx0]
-    #     root_rot1 = self._frame_root_rot[frame_idx1]
-
-    #     root_vel = self._frame_root_vel[frame_idx0]
-    #     root_ang_vel = self._frame_root_ang_vel[frame_idx0]
-
-    #     joint_rot0 = self._frame_joint_rot[frame_idx0]
-    #     joint_rot1 = self._frame_joint_rot[frame_idx1]
-
-    #     # joint_pos0 = self._frame_joint_pos[frame_idx0] TODO
-    #     # joint_pos1 = self._frame_joint_pos[frame_idx1]
-
-    #     dof_vel = self._frame_dof_vel[frame_idx0]
-
-    #     blend_unsq = blend[..., np.newaxis]
-    #     root_pos = (1.0 - blend_unsq) * root_pos0 + blend_unsq * root_pos1
-    #     root_rot = transforms.slerp(root_rot0, root_rot1, blend)
-        
-    #     joint_rot = transforms.slerp(joint_rot0, joint_rot1, blend_unsq)
-    #     joint_pos =  joint_rot #transforms.slerp(joint_pos0, joint_pos1, blend_unsq)
-
-    #     root_pos_deltas = self._motion_root_pos_delta[motion_ids]
-
-    #     phase = motion_times / motion_lengths
-    #     phase = np.floor(phase)
-    #     phase = phase[..., np.newaxis]
-        
-    #     root_pos_offset = np.zeros((motion_ids.shape[0], 3))
-    #     root_pos_offset = phase * root_pos_deltas
-
-    #     # root_pos += root_pos_offset #TODO
-
-    #     return root_pos, root_rot, root_vel, root_ang_vel, joint_rot, joint_pos, dof_vel
+    def get_frame_state(self, clip_id: int, frame_id: int) -> dict:
+        """Kinematic state for a single frame within a clip."""
+        clip = self._clips[int(clip_id)]
+        frame_id = int(np.clip(frame_id, 0, clip.num_frames - 1))
+        joint_dof = clip.frames[frame_id : frame_id + 1]
+        return {
+            "root_pos": clip.root_pos[frame_id],
+            "root_rot": clip.root_rot[frame_id],
+            "root_vel": clip.root_vel[frame_id],
+            "root_ang_vel": clip.root_ang_vel[frame_id],
+            "joint_dof": clip.frames[frame_id],
+            "joint_rot": self._skeleton.dof_to_rot(joint_dof)[0],
+            "dof_vel": clip.dof_vel[frame_id],
+            "body_pos": clip.body_pos[frame_id],
+        }
 

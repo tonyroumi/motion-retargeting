@@ -6,7 +6,6 @@ from typing import Tuple
 
 import numpy as np
 
-
 @dataclass
 class MotionClip:
     """A single motion sequence with pre-computed kinematic state."""

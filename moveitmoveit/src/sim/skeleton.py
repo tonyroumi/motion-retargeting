@@ -218,10 +218,16 @@ class Skeleton:
         return self._ee_ids
 
     def get_joint(self, name: str) -> Joint:
-        return self._joints[name]
+        for j in self._joints:
+            if j.name == name:
+                return j
+        raise KeyError(f"Joint '{name}' not found")
 
     def get_body(self, name: str) -> Body:
-        return self._bodies[name]
+        for b in self._bodies:
+            if b.name == name:
+                return b
+        raise KeyError(f"Body '{name}' not found")
 
     def get_actuated_joints(self) -> List[Joint]:
         """Return joints that are NOT free joints (i.e. actuatable DOFs)."""

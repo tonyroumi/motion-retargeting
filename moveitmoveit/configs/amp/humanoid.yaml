@@ -1,0 +1,12 @@
+defaults:
+  - humanoid/environment@environment
+  - humanoid/algorithm@algorithm
+  - humanoid/networks@networks
+  - _self_
+
+runner:
+  num_transitions_per_env: 32
+  total_timesteps: 200000000
+  log_interval: 10
+  checkpoint_interval: 500
+  device: "cuda"

@@ -5,5 +5,5 @@ from gymnasium.envs.registration import register
 
 register(
     id="AMPEnv",
-    entry_point="moveitmoveit.src.env.amp_env:AMPEnv",
+    entry_point=AMPEnv,
 )

@@ -80,6 +80,10 @@ def load_clip(path: Path) -> dict:
         "name": str(d["name"]),
         "fps": float(d["fps"]),
         "dt": float(d["dt"]),
+        "root_pos": d["root_pos"].astype(np.float64),
+        "root_rot": d["root_rot"].astype(np.float64),
+        "root_vel": d["root_vel"].astype(np.float64),
+        "root_ang_vel": d["root_ang_vel"].astype(np.float64),
         "dof_pos": d["dof_pos"].astype(np.float64),
         "dof_vel": d["dof_vel"].astype(np.float64),
     }
@@ -148,8 +152,11 @@ def run(clips: list[Path], xml_path: Path, speed: float) -> None:
                 n_frames = clip["dof_pos"].shape[0]
                 frame_idx = frame_idx % n_frames
 
-                data.qpos[:] = clip["dof_pos"][frame_idx]
-                data.qvel[:] = clip["dof_vel"][frame_idx]
+                qpos = np.concatenate([clip["root_pos"][frame_idx], clip["root_rot"][frame_idx], clip["dof_pos"][frame_idx]])
+                qvel = np.concatenate([clip["root_vel"][frame_idx], clip["root_ang_vel"][frame_idx], clip["dof_vel"][frame_idx]])
+
+                data.qpos[:] = qpos
+                data.qvel[:] = qvel
                 mujoco.mj_forward(model, data)
                 viewer.sync()
 
@@ -157,35 +164,26 @@ def run(clips: list[Path], xml_path: Path, speed: float) -> None:
                 if frame_idx >= n_frames:
                     frame_idx = 0  # loop
 
-            else:
+            # else:
                 # Sync at ~200 Hz when paused or waiting for next frame
-                viewer.sync()
-                time.sleep(0.005)
+                # viewer.sync()
+                # time.sleep(0.005)
 
     keys.close()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("src", type=Path, help="Rollout .npz file or directory of .npz files")
-    parser.add_argument("xml", type=Path, help="MuJoCo .xml model file")
-    parser.add_argument(
-        "--speed", type=float, default=1.0,
-        help="Playback speed multiplier (default 1.0 = real-time, 0.5 = half speed)",
-    )
-    args = parser.parse_args()
+    src = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_humanoid")
+    xml_path = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid/humanoid.xml")
+    speed = 1.0
 
-    clips = find_clips(args.src.resolve())
-    xml_path = args.xml.resolve()
+    clips = find_clips(src)
 
     if not xml_path.is_file():
         print(f"Error: model file not found: {xml_path}")
         sys.exit(1)
 
-    run(clips, xml_path, args.speed)
+    run(clips, xml_path, speed)
 
 
 if __name__ == "__main__":

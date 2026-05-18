@@ -34,10 +34,6 @@ import torch
 import numpy as np
 from typing import Optional, Union
 
-ObsLike  = Union[torch.Tensor, np.ndarray]
-DoneLike = Union[torch.Tensor, np.ndarray]
-
-
 class CircularObsBuffer:
     """
     Sliding-window ring buffer for AMP discriminator observations.
@@ -55,17 +51,13 @@ class CircularObsBuffer:
 
     def __init__(
         self,
-        obs_dim:        int,
+        obs_dim: int,
         disc_obs_steps: int,
-        n_envs:         int,
-        capacity:       int,
-        device:         Union[str, torch.device] = "cpu",
-        obs_dtype:      torch.dtype = torch.float32,
+        n_envs: int,
+        capacity: int,
+        device: Union[str, torch.device] = "cpu",
+        obs_dtype: torch.dtype = torch.float32,
     ) -> None:
-        assert obs_dim        > 0
-        assert disc_obs_steps > 0
-        assert n_envs         > 0
-        assert capacity       > 0
 
         self.obs_dim        = obs_dim
         self.disc_obs_steps = disc_obs_steps
@@ -92,11 +84,7 @@ class CircularObsBuffer:
     # Core interface
     # ------------------------------------------------------------------
 
-    def seed_from_windows(
-        self,
-        windows: ObsLike,
-        env_ids: Optional[Union[torch.Tensor, np.ndarray]] = None,
-    ) -> None:
+    def seed_from_windows(self, windows: torch.Tensor) -> None:
         """
         Initialise the sliding window from motion-library data and flush to ring.
 
@@ -110,37 +98,27 @@ class CircularObsBuffer:
         env_ids : optional 1-D indices of environments being reset. When None,
                 all environments are initialised (original behaviour).
         """
-        if isinstance(windows, np.ndarray):
-            windows = torch.from_numpy(windows)
-        windows = windows.to(device=self.device, dtype=self.obs_dtype)
+        self._window_buf = windows
+        self._flush_all()
 
-        if env_ids is None:
-            windows = windows.reshape(self.n_envs, self.disc_obs_steps, self.obs_dim)
-            self._window_buf = windows
-            self._flush_all()
-        else:
-            if isinstance(env_ids, np.ndarray):
-                env_ids = torch.from_numpy(env_ids).to(self.device)
-            windows = windows.reshape(len(env_ids), self.disc_obs_steps, self.obs_dim)
-            self._window_buf[env_ids] = windows
-            self._flush_envs(env_ids)
-
-    def add(self, obs: ObsLike) -> None:
+    def add(
+        self,
+        obs:     torch.Tensor,
+        env_ids: torch.Tensor = None,
+    ) -> None:
         """
         Slide the window left by one, append a new simulator observation, and
-        flush every env's window into the ring buffer immediately.
+        flush to the ring buffer immediately.
 
         Parameters
         ----------
-        obs : (n_envs, obs_dim) — one observation per env from the simulator.
+        obs     : (n_envs, obs_dim) or (len(env_ids), obs_dim)
+        env_ids : optional subset of envs to update. When None, all envs are
+                  updated (original behaviour).
         """
-        obs = self._to_obs_tensor(obs)   # (n_envs, obs_dim)
-
-        # Roll left: index 0 (oldest) wraps to index -1, then we overwrite it.
-        self._window_buf = torch.roll(self._window_buf, shifts=-1, dims=1)
-        self._window_buf[:, -1, :] = obs
-
+        self._window_buf = obs
         self._flush_all()
+        return self._window_buf.reshape(self.n_envs, -1)
 
     def reset_envs(self, env_indices: Union[torch.Tensor, np.ndarray]) -> None:
         """
@@ -149,13 +127,7 @@ class CircularObsBuffer:
         Call this when you have the new motion-lib seed ready to immediately
         follow with seed_from_windows for those specific envs.
         """
-        if isinstance(env_indices, np.ndarray):
-            env_indices = torch.from_numpy(env_indices).to(self.device)
         self._window_buf[env_indices] = 0.0
-
-    # ------------------------------------------------------------------
-    # Sampling
-    # ------------------------------------------------------------------
 
     def sample(
         self,
@@ -227,19 +199,3 @@ class CircularObsBuffer:
         self._buf[indices] = flat
         self._buf_ptr = (self._buf_ptr + n) % self.capacity
         self._size = min(self._size + n, self.capacity)
-
-    def _to_obs_tensor(self, x: ObsLike) -> torch.Tensor:
-        if isinstance(x, np.ndarray):
-            x = torch.from_numpy(x)
-        return x.to(device=self.device, dtype=self.obs_dtype)
-
-    def __repr__(self) -> str:
-        return (
-            f"CircularObsBuffer("
-            f"obs_dim={self.obs_dim}, "
-            f"disc_obs_steps={self.disc_obs_steps}, "
-            f"n_envs={self.n_envs}, "
-            f"capacity={self.capacity}, "
-            f"device={self.device}, "
-            f"size={self._size})"
-        )

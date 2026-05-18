@@ -5,7 +5,6 @@ from typing import Any, Generator
 
 import torch
 
-
 class BaseBuffer(ABC):
     """Abstract base class for all experience buffers.
     """

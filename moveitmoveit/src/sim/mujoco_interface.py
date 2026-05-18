@@ -88,11 +88,11 @@ class MujocoInterface(SimInterface):
     @property
     def body_pos(self) -> np.ndarray:
         """All body positions (nbody, 3) in world frame."""
-        return self._data.xpos[1:].copy()
+        return self._data.xpos.copy()
 
     @body_pos.setter
     def body_pos(self, value: np.ndarray) -> None:
-        self._data.xpos[1:] = value
+        self._data.xpos = value
 
     @property
     def dof_pos(self) -> np.ndarray:
@@ -144,6 +144,13 @@ class MujocoInterface(SimInterface):
             self._data.qvel[:] = ref_qvel
         else:
             self._data.qvel[:] = 0.0
+        self._data.time = 0.0
+        mujoco.mj_forward(self._model, self._data)
+
+    def init_from_keyframe(self, keyframe_id: int) -> None:
+        """Initialize simulation from a keyframe."""
+        self._data.qpos[:] = self._model.key_qpos[keyframe_id]
+        self._data.qvel[:] = self._model.key_qvel[keyframe_id]
         self._data.time = 0.0
         mujoco.mj_forward(self._model, self._data)
 

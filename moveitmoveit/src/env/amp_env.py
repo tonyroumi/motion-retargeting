@@ -9,13 +9,22 @@ from gymnasium import spaces
 
 from moveitmoveit.src.motion import MotionLibrary
 import moveitmoveit.src.transforms as transforms
-from utils import Logger
 
 from .mujoco_env import MujocoEnv, MujocoEnvParams
 
 @dataclass(frozen=True)
 class AmpEnvParams(MujocoEnvParams):
     num_disc_obs_steps: int = 10
+
+    # Purely Tracking rewards
+
+    tracking_sigma: float = 1.0
+    tracking_root_pos_weight: float = 0.15
+    tracking_root_rot_weight: float = 0.15
+    tracking_root_vel_weight: float = 0.10
+    tracking_joint_rot_weight: float = 0.20
+    tracking_dof_vel_weight: float = 0.05
+    tracking_ee_pos_weight: float = 0.10
 
 class AMPEnv(MujocoEnv):
     """Combined goal + style RL environment."""
@@ -25,16 +34,18 @@ class AMPEnv(MujocoEnv):
         model_path: str,
         motion_clips: List[str],
         params: AmpEnvParams,
-        logger: Logger
+        render_mode: str = None
     ) -> None:
-        super().__init__(model_path, params)
+        super().__init__(model_path, params, render_mode)
 
-        self.motion_lib = MotionLibrary(srcs=motion_clips, skeleton=self.skeleton, logger=logger)
+        self.motion_lib = MotionLibrary(srcs=motion_clips, skeleton=self.skeleton)
 
         disc_obs = self._get_disc_obs()
         self.disc_observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=disc_obs.shape, dtype=np.float32,
         )
+
+        self._ref_disc_obs = np.zeros((self.params.num_disc_obs_steps, disc_obs.shape[0]), dtype=np.float32)
 
         self._current_clip_id = 0
         self._current_frame_id = 0
@@ -43,6 +54,13 @@ class AMPEnv(MujocoEnv):
         self._timestep_buf = 0
         self._time_buf = 0
         self._done = 0
+
+    def clone(self):
+        return AMPEnv(
+            model_path=self.model_path,
+            motion_clips=self.motion_clips,
+            params=self.params,
+        )
 
     def reset(
         self,
@@ -53,30 +71,36 @@ class AMPEnv(MujocoEnv):
         super().reset(seed=seed, options=options)
 
         qpos, qvel, frame_info = self.motion_lib.sample_start_state(rng=self.np_random)
-        self._current_clip_id = frame_info["clip_id"]
-        self._current_frame_id = frame_info["frame_id"]
-        self._motion_time = frame_info["motion_time"]
+        self._current_clip_id = int(np.asarray(frame_info["clip_id"]).item())
+        self._current_frame_id = int(np.asarray(frame_info["frame_id"]).item())
+        self._motion_time = float(np.asarray(frame_info["motion_time"]).item())
 
         self.sim.init_from_reference_motion(
             qpos, qvel,
         )
 
-        self._timestep_buf = self._motion_time / self.sim.timestep #TODO(anthony) need to verify this.
+        self._timestep_buf = self._motion_time / self.sim.timestep
         self._time_buf = self._motion_time
         self._done = 0
 
         obs = self._get_obs()
 
         # Discriminator observations are mixed with simulator state and motion lib window... TODO(better notes)
-        disc_obs = self._fetch_ref_disc_obs(frame_info["clip_id"], frame_info["motion_time"]) 
+        ref_disc_obs = self._fetch_ref_disc_obs(frame_info["clip_id"], frame_info["motion_time"])
+        self._ref_disc_obs = ref_disc_obs.reshape(self.params.num_disc_obs_steps, -1)
+
+        motion_ids = self.motion_lib.sample_motions(1, rng=self.np_random)
+        motion_times = self.motion_lib.sample_times(motion_ids, rng=self.np_random)
+        ref_disc_obs = self._fetch_ref_disc_obs(motion_ids, motion_times)
 
         info = {
-            "disc_obs": disc_obs,
+            "disc_obs": self._ref_disc_obs,
+            "ref_disc_obs": ref_disc_obs,
             "clip_id": self._current_clip_id,
             "frame_id": self._current_frame_id,
         }
         return obs, info
-    
+
     def _fetch_ref_disc_obs(self, clip_id: np.ndarray, motion_time: np.ndarray) -> np.ndarray:
         """WHY DO WE DO THIS CLARIFYYYYYY"""
         motion_ids = np.tile(clip_id[..., np.newaxis], [1, self.params.num_disc_obs_steps])
@@ -90,6 +114,9 @@ class AMPEnv(MujocoEnv):
         root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, body_pos = (
             self.motion_lib.get_frame_data(motion_ids, motion_times)
         )
+
+        root_rot = transforms.quat_pos(root_rot)
+        joint_rot = transforms.quat_pos(joint_rot)
 
         root_rot_norm = transforms.quat_to_tan_norm(root_rot)
         joint_rot_norm = transforms.quat_to_tan_norm(joint_rot)
@@ -111,18 +138,28 @@ class AMPEnv(MujocoEnv):
         self,
         action: np.ndarray,
     ) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        self._current_frame_id += 1
 
         obs, reward, terminated, truncated, _ = super().step(action)
 
         self._timestep_buf += 1
         self._time_buf = self.sim.timestep * self._timestep_buf
 
-        self._current_frame_id += 1
+        # Circular buffer
         curr_disc_obs = self._get_disc_obs()
-        self._prev_disc_obs = curr_disc_obs
+        self._ref_disc_obs = np.roll(
+            self._ref_disc_obs, shift=-1, axis=0
+        )
+        self._ref_disc_obs[-1] = curr_disc_obs
+        disc_obs = self._ref_disc_obs
+
+        motion_ids = self.motion_lib.sample_motions(1, rng=self.np_random)
+        motion_times = self.motion_lib.sample_times(motion_ids, rng=self.np_random)
+        ref_disc_obs = self._fetch_ref_disc_obs(motion_ids, motion_times)
 
         info = {
-            "disc_obs": curr_disc_obs,
+            "disc_obs": disc_obs,
+            "ref_disc_obs": ref_disc_obs,
             "motion_frame": self._current_frame_id,
         }
         return obs, reward, terminated, truncated, info
@@ -137,6 +174,9 @@ class AMPEnv(MujocoEnv):
         ee_pos = self.sim.ee_positions
 
         joint_rot = self.skeleton.dof_to_rot(dof_pos[np.newaxis])
+
+        root_rot = transforms.quat_pos(root_rot)
+        joint_rot = transforms.quat_pos(joint_rot)
 
         root_rot_norm = transforms.quat_to_tan_norm(root_rot)
         joint_rot_norm = transforms.quat_to_tan_norm(joint_rot)
@@ -158,15 +198,81 @@ class AMPEnv(MujocoEnv):
         """Discriminator observation vector."""
         return self._get_obs()
 
+    def _compute_tracking_cost(self) -> float:
+        """Squared tracking error vs the current reference motion frame."""
+        clip_id = self._current_clip_id
+        frame_id = self._current_frame_id
+        ref = self.motion_lib.get_frame_state(clip_id, frame_id)
+
+        ref_root_pos = ref["root_pos"]
+        ref_root_rot = transforms.quat_pos(ref["root_rot"])
+        sim_root_pos = self.sim.root_pos
+        sim_root_rot = transforms.quat_pos(self.sim.root_quat)
+
+        ref_pos_local = np.array([0.0, 0.0, ref_root_pos[2]], dtype=np.float64)
+        sim_pos_local = transforms.transform_positions_to_root_frame(
+            sim_root_pos, ref_root_pos, ref_root_rot,
+        )
+        root_pos_err = sim_pos_local - ref_pos_local
+
+        ref_rot_h = transforms.quat_mul(
+            transforms.calc_heading_quat_inv(ref_root_rot), ref_root_rot,
+        )
+        sim_rot_h = transforms.quat_mul(
+            transforms.calc_heading_quat_inv(sim_root_rot), sim_root_rot,
+        )
+        root_rot_err = transforms.quat_to_exp_map(
+            transforms.quat_diff(ref_rot_h, sim_rot_h),
+        )
+
+        ref_root_vel_h = transforms.transform_velocities_to_root_frame(
+            ref["root_vel"], ref_root_rot,
+        )
+        sim_root_vel_h = transforms.transform_velocities_to_root_frame(
+            self.sim.root_vel, ref_root_rot,
+        )
+        root_vel_err = sim_root_vel_h - ref_root_vel_h
+
+        ref_joint_rot = transforms.quat_pos(ref["joint_rot"])
+        sim_joint_rot = transforms.quat_pos(
+            self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0],
+        )
+        joint_rot_err = transforms.quat_to_exp_map(
+            transforms.quat_diff(ref_joint_rot, sim_joint_rot),
+        )
+
+        dof_vel_err = self.sim.dof_vel - ref["dof_vel"]
+
+        ref_ee_h = transforms.transform_positions_to_root_frame(
+            ref["body_pos"][self.skeleton.ee_ids],
+            ref_root_pos,
+            ref_root_rot,
+        )
+        sim_ee_h = transforms.transform_positions_to_root_frame(
+            self.sim.ee_positions,
+            ref_root_pos,
+            ref_root_rot,
+        )
+        ee_pos_err = sim_ee_h - ref_ee_h
+
+        cost = (
+            self.params.tracking_root_pos_weight * np.mean(np.square(root_pos_err))
+            + self.params.tracking_root_rot_weight * np.mean(np.square(root_rot_err))
+            + self.params.tracking_root_vel_weight * np.mean(np.square(root_vel_err))
+            + self.params.tracking_joint_rot_weight * np.mean(np.square(joint_rot_err))
+            + self.params.tracking_dof_vel_weight * np.mean(np.square(dof_vel_err))
+            + self.params.tracking_ee_pos_weight * np.mean(np.square(ee_pos_err))
+        )
+        return float(cost)
+
     def _compute_reward(self) -> float:
-        """Task reward: root linear velocity along facing direction (heading-frame +x)."""
-        root_vel = self.sim.root_vel
-        root_quat = self.sim.root_quat
-        vel_heading = transforms.transform_velocities_to_root_frame(root_vel, root_quat)
-        return float(vel_heading[0])
+        """Task reward: exponential decay of motion-tracking cost."""
+        cost = self._compute_tracking_cost()
+        sigma_sq = self.params.tracking_sigma ** 2
+        return float(np.exp(-cost / sigma_sq))
 
     def _check_termination(self) -> bool:
         """Early termination conditions (e.g. root height, deviation)."""
-        if (self.sim.root_pos[-1] < 0.8):
+        if self.sim.body_pos[1][-1] < 0.6:
             return True
         return False

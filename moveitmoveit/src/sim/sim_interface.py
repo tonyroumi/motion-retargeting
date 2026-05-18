@@ -167,6 +167,11 @@ class SimInterface(ABC):
         ...
 
     @abstractmethod
+    def init_from_keyframe(self, keyframe_id: int) -> None:
+        """Initialize simulation from a keyframe."""
+        ...
+
+    @abstractmethod
     def step(self, ctrl=None) -> None:
         """Advance the simulation by one timestep."""
         ...

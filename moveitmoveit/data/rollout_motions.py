@@ -1,34 +1,43 @@
 """
-Rollout motion clips through MuJoCo to extract kinematic state.
+Rollout motion clips through MuJoCo to extract kinematic state for AMP.
 
 For each .npz clip in the input directory, sub-steps between consecutive
 keyframes using mj_integratePos and saves the resulting kinematic quantities
-at each sub-step.
+at each sub-step. Output spacing is set to the *control* timestep used during
+training so that discriminator reference transitions are sampled at the same
+rate as policy transitions.
 
 Between keyframes i and i+1 (separated by frame_dt = 1/fps):
   - velocity is computed once via mj_differentiatePos
-  - mj_integratePos propagates qpos forward by sub_dt each step
+  - mj_integratePos propagates qpos forward by control_dt each step
   - each intermediate state is recorded
 
+The control timestep must be an integer divisor of frame_dt; this is asserted.
+
 Output length: (N - 1) * num_substeps + 1  where
-  num_substeps = round(frame_dt / sub_dt)
+  num_substeps = frame_dt / control_dt   (must be integer)
+  control_dt   = decimation / sim_freq
 
 Saved per-clip (float32 npz):
   root_pos      (M, 3)          world-frame root position
   root_rot      (M, 4)          root quaternion (w, x, y, z)
-  root_vel      (M, 3)          root linear velocity
-  root_ang_vel  (M, 3)          root angular velocity
-  dof_pos       (M, nq)         full qpos
-  body_pos      (M, nbody, 3)   world-frame body positions (xpos)
+  root_vel      (M, 3)          root linear velocity (world frame)
+  root_ang_vel  (M, 3)          root angular velocity (body-local frame)
+  dof_pos       (M, nq-7)       joint positions (qpos minus free-root slots)
+  body_pos      (M, nbody, 3)   world-frame body positions (full xpos, index 0 is world)
   joint_pos     (M, njoint, 3)  world-frame joint anchor positions (xanchor)
-  dof_vel       (M, nv)         full qvel
+  dof_vel       (M, nv-6)       joint velocities (qvel minus free-root slots)
+
+Velocity convention note: for a free root joint, qvel[0:3] is linear velocity
+in the world frame and qvel[3:6] is angular velocity in the body-local frame.
+Discriminator observations built from the live sim must use the same
+convention or there will be a silent distribution mismatch.
 
 Usage:
-    # Keep original fps (one output frame per input frame)
-    python rollout_motions.py data/humanoid --output data/humanoid_rollout
-
-    # 4x upsampling for 30fps source → 120fps output
-    python rollout_motions.py data/humanoid --output data/humanoid_rollout --timestep 0.00833
+    # Training runs at sim_freq=200, decimation=4 (control at 50 Hz):
+    python rollout_motions.py data/humanoid \\
+        --output data/humanoid_rollout \\
+        --sim-freq 200 --decimation 4
 """
 
 from __future__ import annotations
@@ -70,18 +79,29 @@ def rollout_clip(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     frame_dt: float,
-    sub_dt: float,
-) -> dict:
+    control_dt: float,
+) -> tuple[dict, int]:
     """
-    Kinematically replay frames with sub-step interpolation.
+    Kinematically replay frames with sub-step interpolation at the control rate.
 
     Between each pair of keyframes the inter-frame velocity is held constant
-    and mj_integratePos steps qpos forward by sub_dt, giving smooth
+    and mj_integratePos steps qpos forward by control_dt, giving smooth
     intermediate states that respect the quaternion manifold.
+
+    Requires control_dt to be an integer divisor of frame_dt.
     """
     N = frames.shape[0]
-    num_substeps = max(1, round(frame_dt / sub_dt))
-    actual_sub_dt = frame_dt / num_substeps
+
+    # Exact integer divisor required — control rate must align with mocap fps
+    ratio = frame_dt / control_dt
+    num_substeps = round(ratio)
+    if not np.isclose(ratio, num_substeps, rtol=1e-6):
+        raise ValueError(
+            f"control_dt ({control_dt}) must evenly divide frame_dt ({frame_dt}); "
+            f"got ratio {ratio:.6f}. Pick a control frequency that is an "
+            f"integer divisor of the mocap fps ({1.0 / frame_dt:.2f})."
+        )
+    num_substeps = max(1, num_substeps)
     total = (N - 1) * num_substeps + 1
 
     nv = model.nv
@@ -93,10 +113,10 @@ def rollout_clip(
         root_rot=np.zeros((total, 4), dtype=np.float32),
         root_vel=np.zeros((total, 3), dtype=np.float32),
         root_ang_vel=np.zeros((total, 3), dtype=np.float32),
-        dof_pos=np.zeros((total, model.nq-7), dtype=np.float32),
+        dof_pos=np.zeros((total, model.nq - 7), dtype=np.float32),
         body_pos=np.zeros((total, nbody, 3), dtype=np.float32),
         joint_pos=np.zeros((total, njoint, 3), dtype=np.float32),
-        dof_vel=np.zeros((total, nv-6), dtype=np.float32),
+        dof_vel=np.zeros((total, nv - 6), dtype=np.float32),
     )
 
     qvel = np.zeros(nv)
@@ -108,10 +128,10 @@ def rollout_clip(
         mujoco.mj_differentiatePos(model, qvel, frame_dt, frames[i], frames[i + 1])
 
         for k in range(num_substeps):
-            # Integrate from keyframe i by k * sub_dt
+            # Integrate from keyframe i by k * control_dt
             q_sub[:] = frames[i]
             if k > 0:
-                mujoco.mj_integratePos(model, q_sub, qvel, k * actual_sub_dt)
+                mujoco.mj_integratePos(model, q_sub, qvel, k * control_dt)
 
             data.qpos[:] = q_sub
             data.qvel[:] = qvel
@@ -119,19 +139,20 @@ def rollout_clip(
             _record(data, out, out_idx)
             out_idx += 1
 
-    # Final keyframe — hold last velocity
+    # Terminal frame — qvel here is never consumed as a "current state" by the
+    # discriminator (no successor exists), so we just hold the last velocity.
     data.qpos[:] = frames[-1]
     data.qvel[:] = qvel
     mujoco.mj_forward(model, data)
     _record(data, out, out_idx)
 
-    return out, num_substeps, actual_sub_dt
+    return out, num_substeps
 
 
 def process_directory(
     src_dir: Path,
     out_dir: Path,
-    timestep: float | None,
+    control_dt: float,
 ) -> None:
     xml_path = find_xml(src_dir)
     print(f"Loading model: {xml_path}")
@@ -143,6 +164,8 @@ def process_directory(
         return
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    out_fps = 1.0 / control_dt
+    print(f"Rolling out at control_dt={control_dt} ({out_fps:.2f} Hz)\n")
 
     for clip_path in clips:
         d = np.load(str(clip_path), allow_pickle=False)
@@ -151,23 +174,25 @@ def process_directory(
         frames = d["frames"].astype(np.float64)
 
         frame_dt = 1.0 / fps
-        sub_dt = timestep if timestep is not None else frame_dt
 
         if frames.shape[1] != model.nq:
             print(f"[skip] {clip_path.name}: frame width {frames.shape[1]} != nq {model.nq}")
             continue
 
         data = mujoco.MjData(model)
-        state, num_substeps, actual_sub_dt = rollout_clip(frames, model, data, frame_dt, sub_dt)
-        out_frames = state["root_pos"].shape[0]
-        out_fps = 1.0 / actual_sub_dt
+        try:
+            state, num_substeps = rollout_clip(frames, model, data, frame_dt, control_dt)
+        except ValueError as e:
+            print(f"[skip] {clip_path.name}: {e}")
+            continue
 
+        out_frames = state["root_pos"].shape[0]
         out_path = out_dir / clip_path.name
         np.savez_compressed(
             str(out_path),
             name=np.array(name),
             fps=np.float32(out_fps),
-            dt=np.float32(actual_sub_dt),
+            dt=np.float32(control_dt),
             **state,
         )
         print(
@@ -181,11 +206,11 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "src_dir",
-        type=Path,
-        help="Directory containing .npz clips and one .xml model",
-    )
+    # parser.add_argument(
+    #     "src_dir",
+    #     type=Path,
+    #     help="Directory containing .npz clips and one .xml model",
+    # )
     parser.add_argument(
         "--output", "-o",
         type=Path,
@@ -193,24 +218,37 @@ def main() -> None:
         help="Output directory (default: <src_dir>_rollout)",
     )
     parser.add_argument(
-        "--timestep",
+        "--sim-freq",
         type=float,
-        default=None,
-        help="Sub-step dt in seconds (default: 1/fps — one output frame per keyframe)",
+        required=True,
+        help="MuJoCo simulation frequency used during training (Hz)",
+    )
+    parser.add_argument(
+        "--decimation",
+        type=int,
+        default=1,
+        help="Sim steps per control step during training "
+             "(control_freq = sim_freq / decimation)",
     )
     args = parser.parse_args()
 
-    src_dir: Path = args.src_dir.resolve()
+    src_dir = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid")
     if not src_dir.is_dir():
         print(f"Error: {src_dir} is not a directory")
         sys.exit(1)
+
+    if args.decimation < 1:
+        print(f"Error: --decimation must be >= 1, got {args.decimation}")
+        sys.exit(1)
+
+    control_dt = args.decimation / args.sim_freq
 
     out_dir: Path = (
         args.output.resolve() if args.output
         else src_dir.parent / (src_dir.name + "_rollout")
     )
 
-    process_directory(src_dir, out_dir, args.timestep)
+    process_directory(src_dir, out_dir, control_dt)
     print(f"\nDone. Results in {out_dir}")
 
 
