@@ -28,7 +28,7 @@ class MujocoInterface(SimInterface):
         self._model.opt.timestep = dt
 
     @property
-    def timestep(self) -> float
+    def timestep(self) -> float:
         return self._model.opt.timestep
 
     @property
@@ -92,16 +92,16 @@ class MujocoInterface(SimInterface):
 
     @body_pos.setter
     def body_pos(self, value: np.ndarray) -> None:
-        self._data.xpos[:] = value
+        self._data.xpos = value
 
     @property
     def dof_pos(self) -> np.ndarray:
         """All joints positions in world frame (qpos)."""
-        return self._data.qpos.copy()
+        return self._data.qpos[7:].copy()
 
     @dof_pos.setter
     def dof_pos(self, value: np.ndarray) -> None:
-        self._data.qpos[:] = value
+        self._data.qpos[7:] = value
 
     @property
     def body_quat(self) -> np.ndarray:
@@ -137,24 +137,20 @@ class MujocoInterface(SimInterface):
         ref_qvel: Optional[np.ndarray] = None,
     ) -> None:
         """
-        Initialise the simulation state from a reference-motion frame.
-
-        Parameters
-        ----------
-        ref_qpos : np.ndarray, shape (nq,)
-            Full qpos vector from the reference motion at the desired frame.
-        ref_qvel : np.ndarray, shape (nv,), optional
-            Full qvel vector.  If ``None``, velocities are zeroed.
+        Init the simulation state from a reference-motion frame.
         """
-        assert ref_qpos.shape == (self._model.nq,), (
-            f"Expected qpos shape ({self._model.nq},), got {ref_qpos.shape}"
-        )
         self._data.qpos[:] = ref_qpos
         if ref_qvel is not None:
-            assert ref_qvel.shape == (self._model.nv,)
             self._data.qvel[:] = ref_qvel
         else:
             self._data.qvel[:] = 0.0
+        self._data.time = 0.0
+        mujoco.mj_forward(self._model, self._data)
+
+    def init_from_keyframe(self, keyframe_id: int) -> None:
+        """Initialize simulation from a keyframe."""
+        self._data.qpos[:] = self._model.key_qpos[keyframe_id]
+        self._data.qvel[:] = self._model.key_qvel[keyframe_id]
         self._data.time = 0.0
         mujoco.mj_forward(self._model, self._data)
 

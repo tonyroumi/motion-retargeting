@@ -5,7 +5,7 @@ from typing import Generator, Tuple
 
 import torch
 
-from .base import BaseBuffer
+from .base_buffer import BaseBuffer
 
 
 @dataclass
@@ -15,14 +15,15 @@ class Transition:
     observations: torch.Tensor = None
     actions: torch.Tensor = None
     rewards: torch.Tensor = None
-    dones: torch.Tensor = None
+    terminated: torch.Tensor = None
+    truncated: torch.Tensor = None
     values: torch.Tensor = None
     actions_log_prob: torch.Tensor = None
     action_mean: torch.Tensor = None
     action_sigma: torch.Tensor = None
 
 class RolloutBuffer(BaseBuffer):
-    """Fixed-length storage for on-policy rollout data (e.g. PPO).
+    """Fixed-length storage for rollout data.
     """
 
     def __init__(
@@ -41,7 +42,8 @@ class RolloutBuffer(BaseBuffer):
         self.observations = torch.zeros(num_transitions, num_envs, obs_dim, device=device)
         self.actions = torch.zeros(num_transitions, num_envs, action_dim, device=device)
         self.rewards = torch.zeros(num_transitions, num_envs, 1, device=device)
-        self.dones = torch.zeros(num_transitions, num_envs, 1, device=device).byte()
+        self.terminated = torch.zeros(num_transitions, num_envs, 1, device=device).byte()
+        self.truncated = torch.zeros(num_transitions, num_envs, 1, device=device).byte()
         self.values = torch.zeros(num_transitions, num_envs, 1, device=device)
         self.actions_log_prob = torch.zeros(num_transitions, num_envs, 1, device=device)
         self.mu = torch.zeros(num_transitions, num_envs, action_dim, device=device)
@@ -50,7 +52,6 @@ class RolloutBuffer(BaseBuffer):
         # Computed during advantage estimation
         self.returns = torch.zeros(num_transitions, num_envs, 1, device=device)
         self.advantages = torch.zeros(num_transitions, num_envs, 1, device=device)
-
 
     def add(self, transition: Transition) -> None:
         """Append one timestep across all environments."""
@@ -62,7 +63,8 @@ class RolloutBuffer(BaseBuffer):
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
-        self.dones[self.step].copy_(transition.dones.view(-1, 1))
+        self.terminated[self.step].copy_(transition.terminated.view(-1, 1))
+        self.truncated[self.step].copy_(transition.truncated.view(-1, 1))
         self.values[self.step].copy_(transition.values)
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)

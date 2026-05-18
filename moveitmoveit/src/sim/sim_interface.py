@@ -163,7 +163,12 @@ class SimInterface(ABC):
         ref_qpos,
         ref_qvel=None,
     ) -> None:
-        """Initialise simulation from a reference-motion frame."""
+        """Initialize simulation from a reference-motion frame."""
+        ...
+
+    @abstractmethod
+    def init_from_keyframe(self, keyframe_id: int) -> None:
+        """Initialize simulation from a keyframe."""
         ...
 
     @abstractmethod

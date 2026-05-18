@@ -36,12 +36,13 @@ class Joint:
     def dof_to_quat(self, dof):
         if self.semantic_type == JointType.HINGE:
             axis = self.axis
-            quat = transforms.axis_angle_to_quat(axis, dof)
+            quat = transforms.axis_angle_to_quat(axis, dof[:, 0])
         elif self.semantic_type == JointType.SPHERICAL:
-            quat = transforms.exp_map_to_quat(dof)
+            q0 = transforms.axis_angle_to_quat(self.axis[0], dof[:, 0])
+            q1 = transforms.axis_angle_to_quat(self.axis[1], dof[:, 1])
+            q2 = transforms.axis_angle_to_quat(self.axis[2], dof[:, 2])
+            quat = transforms.quat_mul(transforms.quat_mul(q0, q1), q2)
         return quat
-
-
 
 @dataclass
 class Body:
@@ -53,7 +54,6 @@ class Body:
     position: Optional[np.ndarray] = None
     rotation: Optional[np.ndarray] = None
     joints: List[Joint] =  field(default_factory=list)
-
 
 class Skeleton:
     """
@@ -218,10 +218,16 @@ class Skeleton:
         return self._ee_ids
 
     def get_joint(self, name: str) -> Joint:
-        return self._joints[name]
+        for j in self._joints:
+            if j.name == name:
+                return j
+        raise KeyError(f"Joint '{name}' not found")
 
     def get_body(self, name: str) -> Body:
-        return self._bodies[name]
+        for b in self._bodies:
+            if b.name == name:
+                return b
+        raise KeyError(f"Body '{name}' not found")
 
     def get_actuated_joints(self) -> List[Joint]:
         """Return joints that are NOT free joints (i.e. actuatable DOFs)."""
@@ -233,15 +239,17 @@ class Skeleton:
     
     def dof_to_rot(self, joint_dof) -> np.ndarray:
         """ Convert MuJoCo's qpos representation into quaternion rotations"""
-        n_actuated = self.num_joints-1
-        joint_rot = np.zeros([n_actuated, 4], dtype=joint_dof.dtype)
+        N = joint_dof.shape[0]
+        n_actuated = len(self.get_actuated_joints())
+        joint_rot = np.zeros([N, n_actuated, 4], dtype=joint_dof.dtype)
 
-        for i, jnt in enumerate(self.joints[1:]):
-            start = jnt.qpos_offset
-            end = + start + jnt.n_dof
-            j_dof = joint_dof[start:end]
-            j_rot = jnt.dof_to_quat(j_dof)
-            joint_rot[i] = j_rot
+        start = 0
+        for i, jnt in enumerate(self.get_actuated_joints()):
+            end = start + jnt.n_dof
+            j_dof = joint_dof[..., start:end]
+            j_rot = jnt.dof_to_quat(j_dof) #TODO[visualize]: visualize the joint rotations
+            joint_rot[:, i] = j_rot
+            start += jnt.n_dof
         return joint_rot
 
     def compute_dof_vel(self, joint_rot, dt: float) -> np.ndarray:
@@ -254,12 +262,11 @@ class Skeleton:
         drot = transforms.quat_mul(transforms.quat_conjugate(joint_rot0), joint_rot1)
         drot = transforms.normalize_quat(drot)
 
-        for i, jnt in enumerate(self.joints):
-            j_drot = drot[:, i-1, :]
+        end_idx = 0
+        for i, jnt in enumerate(self.joints[1:]):
+            j_drot = drot[:, i, :]
 
             match jnt.semantic_type:
-                case JointType.FREE:
-                    continue
                 case JointType.HINGE:
                     j_axis = jnt.axis
                     j_dof_vel = transforms.quat_to_exp_map(j_drot) / dt
@@ -269,7 +276,7 @@ class Skeleton:
                 case _:
                     continue
 
-            start_idx = jnt.dof_idx - 1 # no root here
+            start_idx = 0 if not end_idx else end_idx
             end_idx = start_idx + jnt.n_dof
             dof_vel[:, start_idx:end_idx] = j_dof_vel
 
@@ -314,7 +321,7 @@ class Skeleton:
     @staticmethod
     def _standard_action_bounds(joint: Joint) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Centered action bounds with some cusion
+        Centered, symmetric action bounds with some cushion around the mean.
         """
         j_low, j_high = joint.range
         mid = 0.5 * (j_high + j_low)

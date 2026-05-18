@@ -7,40 +7,27 @@ import torch
 import torch.nn as nn
 import itertools
 
-from moveitmoveit.src.types import BaseParams
+from .params import PPOHyperparams
 from moveitmoveit.src.buffers import RolloutBuffer, Transition
 from moveitmoveit.src.models import PPONetworks
 from utils import Logger
 
 from .base import BaseAlgo
 
-@dataclass(frozen=True)
-class PPOHyperparams(BaseParams):
-    num_mini_batches: int = 1
-    num_learning_epochs: int = 4
-    clip_param: float = 0.2
-    discount: float = 0.97
-    td_lambda: float = 0.95
-    lr: float = 3e-4
-    max_grad_norm: float = 1.0
-    use_clipped_value_loss: bool = True
-    desired_kl: float = 0.01
-    normalize_advantage_per_mini_batch: bool = False
-
-    # loss coef
-    value_loss_coef: float = 1.0
-    entropy_coef: float = 0.2
-
 class PPO(BaseAlgo):
+    networks: PPONetworks
+    params: PPOHyperparams
+
     def __init__(
         self,
         networks: PPONetworks,
-        params: PPOHyperparams = PPOHyperparams(),
-        logger: Logger = Logger(),
+        params: PPOHyperparams,
+        logger: Logger,
     ):
         super().__init__(networks, params, logger)
 
         self.transition = Transition()
+        self._update_count = 0
 
     def init_storage(
         self,
@@ -57,26 +44,35 @@ class PPO(BaseAlgo):
             device=self.networks.device,
         )
 
-    def act(self, observations: torch.Tensor) -> torch.Tensor:
-        actions = self.networks.act(observations)
-        self.transition.actions = actions
-        self.transition.values = self.networks.crit(observations).detach()
-        self.transition.actions_log_prob = self.networks.get_actions_log_prob(actions).detach()
+    def act(self, observations: torch.Tensor, deterministic: bool = False) -> torch.Tensor:
+        self.networks.record_obs(observations.detach())
+        normed_obs = self.networks.normalize_obs(observations)
+
+        normed_actions = self.networks.act(normed_obs, deterministic)
+        actions = self.networks.unnormalize_actions(normed_actions)
+
+        self.transition.actions = normed_actions.detach()
+        self.transition.values = self.networks.crit(normed_obs).detach()
+        self.transition.actions_log_prob = self.networks.get_actions_log_prob(normed_actions).detach()
         self.transition.action_mean = self.networks.action_mean.detach()
         self.transition.action_sigma = self.networks.action_std.detach()
-        self.transition.observations = observations
-        self.networks.record_obs(observations)
+        self.transition.observations = normed_obs.detach()
         
         return actions 
 
     def process_env_step(
         self,
         rewards: torch.Tensor,
-        dones: torch.Tensor,
+        terminated: torch.Tensor,
+        truncated: torch.Tensor,
         infos: dict | None = None,
     ) -> None:
-        self.transition.rewards = rewards.clone()
-        self.transition.dones = dones.clone()
+        self.logger.log_metric("reward/total_mean", rewards.mean().item())
+        self.logger.log_metric("reward/total_std", rewards.std().item())
+
+        self.transition.rewards = rewards.clone().detach()
+        self.transition.terminated = terminated.clone().detach()
+        self.transition.truncated = truncated.clone().detach()
         self.storage.add(self.transition)
         self.transition = Transition()
 
@@ -90,7 +86,7 @@ class PPO(BaseAlgo):
             else:
                 next_values = self.storage.values[step + 1]
 
-            next_is_not_terminal = 1.0 - self.storage.dones[step].float()
+            next_is_not_terminal = 1.0 - self.storage.terminated[step].float()
 
             # Temporal difference error: δ = r + γV(s') - V(s)
             delta = (
@@ -109,9 +105,12 @@ class PPO(BaseAlgo):
         self.storage.add_advantage(advantage)
 
     def get_value(self, observations: torch.Tensor) -> torch.Tensor:
-        return self.networks.crit(observations)
+        normed_obs = self.networks.normalize_obs(observations)
+        return self.networks.crit(normed_obs)
 
     def update(self, optimizer: torch.optim.Optimizer) -> None:
+        super().update(optimizer)
+
         # Accumulators for mean metrics
         mean_value_loss = 0
         mean_surrogate_loss = 0
@@ -179,6 +178,8 @@ class PPO(BaseAlgo):
                 advantages_batch = (advantages_batch - advantages_batch.mean()) / (
                     advantages_batch.std() + 1e-8
                 )
+            # They clip advange for some reason. WHY do they do this?
+            # TODO
 
             # --- Forward passes ---
             self.networks.act(observations_batch)
@@ -334,46 +335,46 @@ class PPO(BaseAlgo):
 
         # === Logging ===
         # Core losses 
-        self.logger.log_metric("loss/surrogate", mean_surrogate_loss)
-        self.logger.log_metric("loss/value", mean_value_loss)
-        self.logger.log_metric("loss/entropy", mean_entropy)
+        self.logger.log_metric("ppo/loss/surrogate", mean_surrogate_loss)
+        self.logger.log_metric("ppo/loss/value", mean_value_loss)
+        self.logger.log_metric("ppo/loss/entropy", mean_entropy)
 
         # Policy constraint diagnostics  
-        self.logger.log_metric("policy/approx_kl", mean_approx_kl)
-        self.logger.log_metric("policy/exact_kl", mean_exact_kl)
-        self.logger.log_metric("policy/clip_fraction", mean_clip_fraction)
+        # self.logger.log_metric("policy/approx_kl", mean_approx_kl)
+        # self.logger.log_metric("policy/exact_kl", mean_exact_kl)
+        # self.logger.log_metric("policy/clip_fraction", mean_clip_fraction)
 
         # Importance sampling diagnostics
-        self.logger.log_metric("ratio/mean", mean_ratio_mean)
-        self.logger.log_metric("ratio/std", mean_ratio_std)
-        self.logger.log_metric("ratio/min", mean_ratio_min)
-        self.logger.log_metric("ratio/max", mean_ratio_max)
-        self.logger.log_metric("ratio/effective_sample_size", mean_ess)
+        # self.logger.log_metric("ratio/mean", mean_ratio_mean)
+        # self.logger.log_metric("ratio/std", mean_ratio_std)
+        # self.logger.log_metric("ratio/min", mean_ratio_min)
+        # self.logger.log_metric("ratio/max", mean_ratio_max)
+        # self.logger.log_metric("ratio/effective_sample_size", mean_ess)
 
         # Log probability diagnostics
-        self.logger.log_metric("log_prob/old_mean", mean_old_log_prob)
-        self.logger.log_metric("log_prob/new_mean", mean_new_log_prob)
-        self.logger.log_metric("log_prob/old_std", mean_old_log_prob_std)
-        self.logger.log_metric("log_prob/new_std", mean_new_log_prob_std)
+        # self.logger.log_metric("log_prob/old_mean", mean_old_log_prob)
+        # self.logger.log_metric("log_prob/new_mean", mean_new_log_prob)
+        # self.logger.log_metric("log_prob/old_std", mean_old_log_prob_std)
+        # self.logger.log_metric("log_prob/new_std", mean_new_log_prob_std)
 
         # Advantage diagnostics (pre-normalization)
-        self.logger.log_metric("advantage/mean", mean_advantage_mean)
-        self.logger.log_metric("advantage/std", mean_advantage_std)
-        self.logger.log_metric("advantage/min", mean_advantage_min)
-        self.logger.log_metric("advantage/max", mean_advantage_max)
+        self.logger.log_metric("ppo/advantage/mean", mean_advantage_mean)
+        self.logger.log_metric("ppo/advantage/std", mean_advantage_std)
+        self.logger.log_metric("ppo/advantage/min", mean_advantage_min)
+        self.logger.log_metric("ppo/advantage/max", mean_advantage_max)
 
         # Value function quality
-        self.logger.log_metric("value/explained_variance", mean_explained_variance)
+        # self.logger.log_metric("value/explained_variance", mean_explained_variance)
 
         # Gradient diagnostics
-        self.logger.log_metric("grad/norm_before_clip", mean_grad_norm_before_clip)
-        self.logger.log_metric("grad/norm_after_clip", mean_grad_norm_after_clip)
+        # self.logger.log_metric("grad/norm_before_clip", mean_grad_norm_before_clip)
+        # self.logger.log_metric("grad/norm_after_clip", mean_grad_norm_after_clip)
 
         # Per-dimension policy statistics
-        if action_dim is not None:
-            for d in range(action_dim):
-                self.logger.log_metric(f"policy_dim/mu_mean_dim{d}", mean_mu_mean_per_dim[d].item())
-                self.logger.log_metric(f"policy_dim/mu_std_dim{d}", mean_mu_std_per_dim[d].item())
-                self.logger.log_metric(f"policy_dim/sigma_mean_dim{d}", mean_sigma_mean_per_dim[d].item())
-                self.logger.log_metric(f"policy_dim/sigma_std_dim{d}", mean_sigma_std_per_dim[d].item())
-                self.logger.log_metric(f"policy_dim/entropy_dim{d}", mean_entropy_per_dim[d].item())
+        # if action_dim is not None:
+            # for d in range(action_dim):
+                # self.logger.log_metric(f"policy_dim/mu_mean_dim{d}", mean_mu_mean_per_dim[d].item())
+                # self.logger.log_metric(f"policy_dim/mu_std_dim{d}", mean_mu_std_per_dim[d].item())
+                # self.logger.log_metric(f"policy_dim/sigma_mean_dim{d}", mean_sigma_mean_per_dim[d].item())
+                # self.logger.log_metric(f"policy_dim/sigma_std_dim{d}", mean_sigma_std_per_dim[d].item())
+                # self.logger.log_metric(f"policy_dim/entropy_dim{d}", mean_entropy_per_dim[d].item())

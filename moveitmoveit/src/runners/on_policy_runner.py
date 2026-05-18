@@ -1,47 +1,49 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import List
 
 from gymnasium.vector import AsyncVectorEnv
+import gymnasium as gym
+import numpy as np
 import torch
 import torch.optim as optim
-import gymnasium as gym
 
+from utils import Logger
 from moveitmoveit.src.algo.base import BaseAlgo
 from moveitmoveit.src.types import BaseParams
 
 @dataclass(frozen=True)
 class OnPolicyRunnerParams(BaseParams):
-    num_transitions_per_env: int = 32
     total_timesteps: int = 2_000_000
-    num_envs: int = 1
-    device: str = "cuda"
+    num_transitions_per_env: int = 32
 
     log_interval: int = 1           # iterations between console logs
-
     checkpoint_interval: int = 100  # iterations between saves
-    checkpoint_dir: str = "checkpoints"
+
+    device: str = "cpu"
 
 class OnPolicyRunner:
-    """Generic on-policy training loop.
-    """
+    """Generic on-policy training loop. """
 
     def __init__(
         self,
         environment: AsyncVectorEnv,
         algorithm: BaseAlgo,
-        params: OnPolicyRunnerParams = OnPolicyRunnerParams(),
+        params: OnPolicyRunnerParams,
+        logger: Logger,
     ):
         self.env = environment
         self.algo = algorithm
         self.params = params
-        self.device = torch.device(params.device)
+        self.logger = logger
 
         obs_dim = environment.observation_space.shape[-1]
         action_dim = environment.action_space.shape[-1]
 
+        self.algo.to_device(self.params.device)
         self.algo.init_storage(
             num_envs=self.env.num_envs,
             num_transitions=params.num_transitions_per_env,
@@ -57,14 +59,16 @@ class OnPolicyRunner:
         self.current_timestep = 0
         self.current_iteration = 0
 
-        os.makedirs(params.checkpoint_dir, exist_ok=True)
-
     def learn(self) -> None:
+        self.algo.train()
+        
         steps_per_iter = self.env.num_envs * self.params.num_transitions_per_env
         total_iterations = self.params.total_timesteps // steps_per_iter
 
-        obs_np, _ = self.env.reset()
-        obs = torch.from_numpy(obs_np).to(self.device)
+        obs, info = self.env.reset()
+        self.algo.process_reset(info)
+
+        train_start = time.perf_counter()
 
         for iteration in range(total_iterations):
             # collect rollouts
@@ -72,24 +76,20 @@ class OnPolicyRunner:
                 with torch.no_grad():
                     actions = self.algo.act(obs)
 
-                next_obs_np, reward, terminated, truncated, info = self.env.step(
-                    actions.cpu().numpy()
+                obs, reward, terminated, truncated, info = self.env.step(
+                    actions
                 )
 
+                # gymnasium envs auto reset
                 self.algo.process_env_step(
-                    rewards=torch.from_numpy(reward).to(self.device),
-                    dones=torch.tensor(terminated).to(self.device),
+                    rewards=reward,
+                    terminated=terminated,
+                    truncated=truncated,
                     infos=info,
                 )
 
-                dones = terminated | truncated
-                if dones.any():
-                    pass
-                    # need to reset done environments somehow...
-                    # obs_reset, infos_reset = env.reset_done(dones)
-
-                obs = torch.from_numpy(next_obs_np).to(self.device)
-
+                self.logger.step()
+            
             # compute returns and update
             with torch.no_grad():
                 last_values = self.algo.get_value(obs)
@@ -101,32 +101,32 @@ class OnPolicyRunner:
             self.current_iteration += 1
 
             if self.current_iteration % self.params.log_interval == 0:
-                print(
-                    f"[iter {self.current_iteration:>6}] "
-                    f"timestep: {self.current_timestep:>10,}"
+                self.logger.pprint(
+                    iteration=self.current_iteration,
+                    wall_time=time.perf_counter() - train_start,
+                    samples=self.current_timestep,
                 )
 
             if self.current_iteration % self.params.checkpoint_interval == 0:
                 path = os.path.join(
-                    self.params.checkpoint_dir,
+                    self.logger.log_dir,
                     f"checkpoint_{self.current_iteration}.pt",
                 )
                 self.save(path)
-                print(f"  Checkpoint saved → {path}")
+                self.logger.info(f"  Checkpoint saved → {path}")
 
     def save(self, path: str) -> None:
-        torch.save(
-            {
-                "networks": self.algo.networks.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
-                "iteration": self.current_iteration,
-                "timestep": self.current_timestep,
-            },
-            path,
-        )
+        data = {
+            "networks": self.algo.networks.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "iteration": self.current_iteration,
+            "timestep": self.current_timestep,
+        }
+        torch.save(data, path)
+        torch.save(data, os.path.join(os.path.dirname(path), "latest.pt"))
 
     def load(self, path: str) -> None:
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.params.device)
         self.algo.networks.load_state_dict(ckpt["networks"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.current_iteration = ckpt["iteration"]

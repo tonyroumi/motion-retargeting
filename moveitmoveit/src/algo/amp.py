@@ -1,87 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
-
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
 from moveitmoveit.src.buffers import CircularObsBuffer
 from moveitmoveit.src.models import AMPNetworks
-from moveitmoveit.src.models.norm import EmpiricalNorm
 from utils import Logger
 
-from .ppo import PPO, PPOHyperparams
-
-#one of observations 
-# one for dics observations. these are separate. makes sense
-
-
-# we will also need an action normalizer. what they do is the 
-# this is what they do in mimickit
-#            a_mean = torch.tensor(0.5 * (a_space.high + a_space.low), device=self._device, dtype=a_dtype)
-#            a_std = torch.tensor(0.5 * (a_space.high - a_space.low), device=self._device, dtype=a_dtype)
-#
-# assert (a_std > 0).all().item(), "init_std must be > 0 for action normalizer (Box action space wrong! Check your XML file. Joints must have 'limited=true' and non-zero bounds.)"
-
-# a_norm = normalizer.Normalizer(a_mean.shape, device=self._device, init_mean=a_mean, 
-#                                      init_std=a_std, dtype=a_dtype)
-
-# so why do they do this?:
-# well... 
-# we can model the standard deviation (average spread of values around the mean) with some basic assumptions about the type of distribution that it is
-# for a uniform distribution (each value has an equal chance of being selected in a range) we can model the standard deviation
-# of a uniform random variable whose support is exactly [a,b] through b-a/sqrt(12). prob derivation. just trust.
-# 
-
-# they use action normalizer to unormalize the action the model produces.
-# why?
-
-#they update normalizers each env step (32 times) and post update step.
-# each env step they call record(). update step they call update.
-
-#dicriminator optimizers and agent optimizers are the same dafuq
-
-@dataclass(frozen=True)
-class AMPHyperparams(PPOHyperparams):
-    # Discriminator replay-buffer settings
-    discriminator_buffer_capacity: int = 100_000
-
-    # Discriminator optimizer
-    disc_lr: float = 1e-4
-
-    # How often (in policy update iterations) to update the discriminator
-    discriminator_update_interval: int = 4
-
-    # Number of gradient steps per discriminator update
-    disc_update_epochs: int = 1
-    disc_mini_batches: int = 4
-
-    disc_grad_penalty_coef: float = 5.0
-
-    style_reward_lambda: float = 0.5 
-    goal_reward_lambda: float = 0.5
+from .ppo import PPO
+from .params import AMPHyperparams
 
 class AMP(PPO):
     """Adversarial Motion Priors (AMP) algorithm. """
+    networks: AMPNetworks
+    params: AMPHyperparams
 
     def __init__(
         self,
         networks: AMPNetworks,
-        params: AMPHyperparams = AMPHyperparams(),
-        logger: Logger = Logger(),
-    ):
+        params: AMPHyperparams,
+        logger: Logger,
+    ):  
         super().__init__(networks, params, logger)
-
-        self.ref_obs_sampler = None
-
-        self._update_count = 0
-
-        self.disc_optimizer = optim.Adam(
-            self.networks.discriminator.parameters(),
-            lr=params.disc_lr,
-        )
+        
+        self._discriminator_update_count = 0
 
     def init_storage(
         self,
@@ -92,77 +34,89 @@ class AMP(PPO):
     ) -> None:
         super().init_storage(num_envs, num_transitions, obs_dim, action_dim)
 
-        disc_obs_dim = self.networks.discriminator.in_channels
         self.discriminator_storage = CircularObsBuffer(
+            obs_dim=obs_dim,
+            disc_obs_steps=self.params.num_disc_obs_steps,
+            n_envs=num_envs,
             capacity=self.params.discriminator_buffer_capacity,
-            num_envs=num_envs,
-            obs_dim=disc_obs_dim,
-            device=self.networks.device,
+            device=self.networks.device
         )
+        self.discriminator_ref_storage = CircularObsBuffer(
+            obs_dim=obs_dim,
+            disc_obs_steps=self.params.num_disc_obs_steps,
+            n_envs=num_envs,
+            capacity=self.params.discriminator_buffer_capacity,
+            device=self.networks.device
+        )
+
+    def process_reset(self, infos: dict, env_ids=None) -> None:
+        """Seed the discriminator sliding window from motion-lib frames returned at reset."""
+        self.discriminator_storage.seed_from_windows(infos["disc_obs"])
 
     def process_env_step(
         self,
         rewards: torch.Tensor,
-        dones: torch.Tensor,
+        terminated: torch.Tensor,
+        truncated: torch.Tensor,
         infos: dict | None = None,
     ) -> None:
-        prev_disc_obs = torch.as_tensor(infos["prev_disc_obs"], dtype=torch.float32, device=self.networks.device)
-        disc_obs = torch.as_tensor(infos["disc_obs"], dtype=torch.float32, device=self.networks.device)
 
-        stacked = torch.concatenate([prev_disc_obs, disc_obs], dim=1)
-        #un problemo here 
-        with torch.no_grad():
-            d = self.networks.disc(stacked).squeeze()
+        num_samples = infos["disc_obs"].shape[0]
+        rand_idx = torch.randperm(num_samples, device=self.networks.device, dtype=torch.long)
+
+        if (self.discriminator_storage.is_full):
+            num_samples = min(num_samples, self.params.disc_replay_samples) 
         
-        style_reward = torch.clamp(1.0 - 0.25 * (d - 1.0) ** 2, min=0.0).clone()
+        idx = rand_idx[:num_samples]
+
+        stacked_disc_obs = self.discriminator_storage.add(infos["disc_obs"][idx])
+        ref_disc_obs = self.discriminator_ref_storage.add(infos["ref_disc_obs"][idx])
+
+        self.networks.record_disc_obs(stacked_disc_obs)
+        self.networks.record_disc_obs(ref_disc_obs)
+
+        normed_disc_obs = self.networks.normalize_disc_obs(stacked_disc_obs)
+
+        with torch.no_grad():
+            d = self.networks.disc(normed_disc_obs).squeeze()
+        
+        prob = torch.sigmoid(d)
+        disc_reward = -torch.log(torch.clamp(1.0 - prob, min=1e-4))
         goal_reward = rewards.clone()
-        rewards = self.params.style_reward_lambda * style_reward + self.params.goal_reward_lambda * goal_reward
+        rewards = self.params.disc_reward_lambda * disc_reward.detach() + self.params.goal_reward_lambda * goal_reward
 
-        super().process_env_step(rewards, dones, infos)
+        self.logger.log_metric("reward/disc_mean", disc_reward.mean().item())
+        self.logger.log_metric("reward/goal_mean", goal_reward.mean().item())
+        self.logger.log_metric("reward/disc_std", disc_reward.std().item())
+        self.logger.log_metric("reward/goal_std", goal_reward.std().item())
 
-        self.discriminator_storage.add(stacked)
-        self.networks.record_disc_obs(stacked)
+        super().process_env_step(rewards, terminated, truncated, infos)
 
     def update(self, optimizer: torch.optim.Optimizer) -> None:
-        # PPO policy update
         super().update(optimizer)
 
-        self._update_count += 1
-
-        # Periodically update the discriminator
         if self._update_count % self.params.discriminator_update_interval == 0:
-            self._update_discriminator()
+            self._update_discriminator(optimizer)
 
-    def _update_discriminator(self) -> None:
+    def _update_discriminator(self, optimizer: torch.optim.Optimizer) -> None:
         """Run one round of discriminator gradient updates."""
-        if self.discriminator_storage.size == 0:
-            return
 
         mean_disc_loss = 0.0
-        num_updates = self.params.disc_update_epochs * self.params.disc_mini_batches
+        mean_disc_ref_accuracy = 0.0
+        mean_disc_agent_accuracy = 0.0
+        mean_disc_ref_logits = 0.0
+        mean_disc_agent_logits = 0.0
 
-        agent_batch_size = max(
-            1,
-            self.discriminator_storage.size // self.params.disc_mini_batches,
-        )
+        for _ in range(self.params.disc_num_updates):
+            agent_input = self.discriminator_storage.sample(self.params.disc_batch_size, stacked=False)
+            normed_agent_input = self.networks.disc_obs_norm.normalize(agent_input)
 
-        for _ in self.discriminator_storage.mini_batch_generator(
-            num_mini_batches=self.params.disc_mini_batches,
-            num_epochs=self.params.disc_update_epochs,
-            sample_size=agent_batch_size * self.params.disc_mini_batches,
-        ):
-            agent_obs, agent_next_obs = _
+            ref_input = self.discriminator_ref_storage.sample(self.params.disc_batch_size, stacked=False)
+            normed_ref_input = self.networks.disc_obs_norm.normalize(ref_input)
+            normed_ref_input.requires_grad_(True)
 
-            # Sample an equal-sized batch of reference motion transitions
-            ref_obs, ref_next_obs = self.ref_obs_sampler(len(agent_obs))
-
-            # Concatenate (s, s') as the discriminator input
-            agent_input = torch.cat([agent_obs, agent_next_obs], dim=-1)
-            ref_input = torch.cat([ref_obs, ref_next_obs], dim=-1)
-
-            # Logistic regression: agent → 0, reference → 1
-            agent_logits = self.networks.disc(agent_input)
-            ref_logits = self.networks.disc(ref_input)
+            agent_logits = self.networks.disc(normed_agent_input)
+            ref_logits = self.networks.disc(normed_ref_input)
 
             agent_loss = nn.functional.binary_cross_entropy_with_logits(
                 agent_logits, torch.zeros_like(agent_logits)
@@ -170,25 +124,52 @@ class AMP(PPO):
             ref_loss = nn.functional.binary_cross_entropy_with_logits(
                 ref_logits, torch.ones_like(ref_logits)
             )
-            disc_loss = agent_loss + ref_loss
+            disc_loss = 0.5 * (agent_loss + ref_loss)
 
-            # gradient penalty on reference inputs
-            if self.params.disc_grad_penalty_coef > 0:
-                inputs = ref_input.detach().requires_grad_(True)
-                outputs = self.networks.discriminator(inputs)
-                grads = torch.autograd.grad(
-                    outputs=outputs.sum(),
-                    inputs=inputs,
-                    create_graph=True,
-                )[0]
-                grad_pentalty = grads.pow(2).sum(dim=-1).mean()
-                disc_loss = disc_loss + self.params.disc_grad_penalty_coef * grad_pentalty
+            logit_weights = self.networks.discriminator.get_logit_weights()
+            disc_logit_loss = torch.sum(torch.square(logit_weights))
+            disc_loss += self.params.disc_logit_reg * disc_logit_loss
 
-            self.disc_optimizer.zero_grad()
+            disc_weight_decay = sum(
+                p.pow(2).sum() for p in self.networks.discriminator.parameters()
+            )
+            disc_loss += self.params.disc_weight_decay * disc_weight_decay
+
+            # gradient penalty
+            disc_ref_grad = torch.autograd.grad(
+                outputs=ref_logits,
+                inputs=normed_ref_input,
+                grad_outputs=torch.ones_like(ref_logits),
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
+            )[0]
+
+            # Square and sum the gradients and take the mean.
+            disc_ref_grad_norm = disc_ref_grad.pow(2).sum(dim=-1).mean()
+            disc_loss = disc_loss + self.params.disc_grad_penalty_coef * disc_ref_grad_norm
+
+            optimizer.zero_grad()
             disc_loss.backward()
-            self.disc_optimizer.step()
+            optimizer.step()
+
+            agent_accuracy = torch.mean((agent_logits < 0).float())
+            ref_disc_accuracy = torch.mean((ref_logits > 0).float()) 
 
             mean_disc_loss += disc_loss.item()
+            mean_disc_ref_accuracy += ref_disc_accuracy.item()
+            mean_disc_agent_accuracy += agent_accuracy.item()
+            mean_disc_ref_logits += torch.mean(ref_logits).item()
+            mean_disc_agent_logits += torch.mean(agent_logits).item()
 
-        mean_disc_loss /= num_updates
+        mean_disc_loss /= self.params.disc_num_updates
+        mean_disc_ref_accuracy /= self.params.disc_num_updates
+        mean_disc_agent_accuracy /= self.params.disc_num_updates
+        mean_disc_ref_logits /= self.params.disc_num_updates
+        mean_disc_agent_logits /= self.params.disc_num_updates
+
         self.logger.log_metric("disc/loss", mean_disc_loss)
+        self.logger.log_metric("disc/agent_accuracy", mean_disc_agent_accuracy)
+        self.logger.log_metric("disc/ref_accuracy", mean_disc_ref_accuracy)
+        self.logger.log_metric("disc/agent_logits", mean_disc_agent_logits)
+        self.logger.log_metric("disc/ref_logits", mean_disc_ref_logits)
