@@ -71,7 +71,7 @@ def find_clips(path: Path) -> list[Path]:
     clips = sorted(path.glob("*.npz"))
     if not clips:
         raise FileNotFoundError(f"No .npz files found in {path}")
-    return clips
+    return [Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_humanoid/humanoid_jog.npz")] #clips
 
 
 def load_clip(path: Path) -> dict:
@@ -108,7 +108,7 @@ def run(clips: list[Path], xml_path: Path, speed: float) -> None:
     keys = KeyReader()
     print(f"\nPlaying: {clips[clip_idx].name}  ({clip['dof_pos'].shape[0]} frames @ {clip['fps']:.0f}fps)")
     print("SPACE=pause  n=next  p=prev  r=restart  q=quit\n")
-
+    vals = []
     with mujoco.viewer.launch_passive(model, data) as viewer:
         last_frame_time = time.perf_counter()
 
@@ -159,6 +159,8 @@ def run(clips: list[Path], xml_path: Path, speed: float) -> None:
                 data.qvel[:] = qvel
                 mujoco.mj_forward(model, data)
                 viewer.sync()
+
+                vals.append(data.xpos[1][-1])
 
                 frame_idx += 1
                 if frame_idx >= n_frames:

@@ -79,11 +79,13 @@ class AMP(PPO):
 
         with torch.no_grad():
             d = self.networks.disc(normed_disc_obs).squeeze()
-        
+
         prob = torch.sigmoid(d)
-        disc_reward = -torch.log(torch.clamp(1.0 - prob, min=1e-4))
-        goal_reward = rewards.clone()
-        rewards = self.params.disc_reward_lambda * disc_reward.detach() + self.params.goal_reward_lambda * goal_reward
+        disc_reward = -torch.log(torch.clamp(1.0 - prob, min=1e-4)) * self.params.disc_reward_lambda
+        goal_reward = rewards.clone() * self.params.goal_reward_lambda
+        rewards = disc_reward.detach() + goal_reward
+
+        self.logger.log_metric("disc/reward_prob", prob.mean().item())
 
         self.logger.log_metric("reward/disc_mean", disc_reward.mean().item())
         self.logger.log_metric("reward/goal_mean", goal_reward.mean().item())
@@ -126,14 +128,14 @@ class AMP(PPO):
             )
             disc_loss = 0.5 * (agent_loss + ref_loss)
 
-            logit_weights = self.networks.discriminator.get_logit_weights()
-            disc_logit_loss = torch.sum(torch.square(logit_weights))
-            disc_loss += self.params.disc_logit_reg * disc_logit_loss
+            # logit_weights = self.networks.discriminator.get_logit_weights()
+            # disc_logit_loss = torch.sum(torch.square(logit_weights))
+            # disc_loss += self.params.disc_logit_reg * disc_logit_loss
 
-            disc_weight_decay = sum(
-                p.pow(2).sum() for p in self.networks.discriminator.parameters()
-            )
-            disc_loss += self.params.disc_weight_decay * disc_weight_decay
+            # disc_weight_decay = sum(
+                # p.pow(2).sum() for p in self.networks.discriminator.parameters()
+            # )
+            # disc_loss += self.params.disc_weight_decay * disc_weight_decay
 
             # gradient penalty
             disc_ref_grad = torch.autograd.grad(

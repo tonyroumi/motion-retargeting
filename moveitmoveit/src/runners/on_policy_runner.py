@@ -52,7 +52,7 @@ class OnPolicyRunner:
         )
 
         self.optimizer = optim.Adam(
-            self.algo.networks.parameters(),
+            self.algo.networks.trainable_parameters(),
             lr=algorithm.params.lr,
         )
 

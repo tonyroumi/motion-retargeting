@@ -70,11 +70,15 @@ class MujocoEnv(gym.Env):
     def step(
         self, action: np.ndarray,
     ) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        com_before = self.sim._data.subtree_com[1] # tmp
         self.sim.step(self._action_to_ctrl(action))
+        com_after = self.sim._data.subtree_com[1] # tmp
         self._episode_step += 1
 
         obs = self._get_obs()
-        reward = self._compute_reward()
+        velocity = (com_after - com_before) / self.sim.dt # tmp
+        reward = 2 * velocity[0] # tmp
+        # reward = self._compute_reward() # tmp
         terminated = self._check_termination()
         truncated = self.episode_time >= self.params.max_episode_time
 
@@ -84,7 +88,7 @@ class MujocoEnv(gym.Env):
         a = np.asarray(action, dtype=np.float64)
         low = self.action_space.low
         high = self.action_space.high
-        return np.minimum(np.maximum(a, low), high)
+        return np.minimum(np.maximum(a, low), high) #this is just clipping
 
     def render(self):
         return self.mujoco_renderer.render(self.render_mode)

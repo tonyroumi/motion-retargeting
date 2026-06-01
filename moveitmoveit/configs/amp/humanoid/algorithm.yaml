@@ -19,7 +19,7 @@ discriminator_buffer_capacity: 200000
 disc_replay_samples: 1000
 disc_logit_reg: 0.01
 disc_lr: 1e-4
-discriminator_update_interval: 2 # They do 1
+discriminator_update_interval: 1 # They do 1
 disc_num_updates: 5
 disc_batch_size: 2048
 disc_grad_penalty_coef: 5.0
@@ -27,4 +27,4 @@ disc_weight_decay: 0.0001
 
 # Reward weights
 disc_reward_lambda: 2.0
-goal_reward_lambda: 1.0
+goal_reward_lambda: 2.0

@@ -1,17 +1,44 @@
 actor:
   hidden_layers: [1024, 512]
   activation: relu
-  ortho_init: true
   noise_std_type: fixed
   init_noise_std: 0.05
+  weight_init:
+    type: uniform
+    trunk:
+      enabled: false
+      zero_bias: true
+    output:
+      enabled: true
+      gain: 0.01
+      zero_bias: true
 
 critic:
   hidden_layers: [1024, 512]
   activation: relu
+  weight_init:
+    type: uniform
+    trunk:
+      enabled: false
+      gain: 1.0
+      zero_bias: true
+    output:
+      enabled: false
+      zero_bias: true
 
 discriminator:
   hidden_layers: [1024, 512]
   activation: relu
+  weight_init:
+    type: uniform
+    trunk:
+      enabled: false
+      gain: 1.0
+      zero_bias: true
+    output:
+      enabled: true
+      gain: 1.0
+      zero_bias: true
 
 obs_norm:
   clip: 5.0

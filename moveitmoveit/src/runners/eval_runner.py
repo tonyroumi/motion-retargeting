@@ -77,7 +77,7 @@ class EvalRunner:
                     sleep_time = max(0, DT - elapsed)
                     time.sleep(sleep_time)
 
-                    if np.any(terminated) or np.any(truncated):
+                    if np.any(terminated):
                         break
 
                 completed_returns.append(float(episode_returns))

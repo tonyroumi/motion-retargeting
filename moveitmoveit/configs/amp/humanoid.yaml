@@ -10,3 +10,5 @@ runner:
   log_interval: 10
   checkpoint_interval: 500
   device: "cuda"
+
+description: "I changed from orthogonal initialization to uniform initialization with the appropriate gains. "

@@ -182,8 +182,8 @@ class PPO(BaseAlgo):
             # TODO
 
             # --- Forward passes ---
-            self.networks.act(observations_batch)
-            actions_log_prob_batch = self.networks.get_actions_log_prob(actions_batch)
+            self.networks.act(observations_batch) #update distribution from OLD samples
+            actions_log_prob_batch = self.networks.get_actions_log_prob(actions_batch) #get action log probability
             value_batch = self.networks.crit(observations_batch)
 
             mu_batch = self.networks.action_mean
