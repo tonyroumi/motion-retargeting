@@ -118,7 +118,7 @@ class CircularObsBuffer:
         """
         self._window_buf = obs
         self._flush_all()
-        return self._window_buf.reshape(self.n_envs, -1)
+        return obs.reshape(self.n_envs, -1)
 
     def reset_envs(self, env_indices: Union[torch.Tensor, np.ndarray]) -> None:
         """

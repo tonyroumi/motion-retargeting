@@ -70,15 +70,11 @@ class MujocoEnv(gym.Env):
     def step(
         self, action: np.ndarray,
     ) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        com_before = self.sim._data.subtree_com[1] # tmp
         self.sim.step(self._action_to_ctrl(action))
-        com_after = self.sim._data.subtree_com[1] # tmp
         self._episode_step += 1
 
         obs = self._get_obs()
-        velocity = (com_after - com_before) / self.sim.dt # tmp
-        reward = 2 * velocity[0] # tmp
-        # reward = self._compute_reward() # tmp
+        reward = self._compute_reward()
         terminated = self._check_termination()
         truncated = self.episode_time >= self.params.max_episode_time
 

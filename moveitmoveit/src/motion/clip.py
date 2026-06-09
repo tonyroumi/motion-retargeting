@@ -24,6 +24,7 @@ class MotionClip:
     body_pos: np.ndarray       # (N, nbody, 3)
     joint_pos: np.ndarray      # (N, njoint, 3)
     dof_vel: np.ndarray        # (N, nv)
+    ctrl: np.ndarray = None    # (N, nv)
 
     @property
     def num_frames(self) -> int:
@@ -73,5 +74,5 @@ class MotionClip:
             root_ang_vel=d["root_ang_vel"].astype(np.float32),
             body_pos=d["body_pos"].astype(np.float32),
             joint_pos=d["joint_pos"].astype(np.float32),
-            dof_vel=d["dof_vel"].astype(np.float32),
+            dof_vel=d["dof_vel"].astype(np.float32)
         )

@@ -1,15 +1,20 @@
 """
-Visualize motion clips in the MuJoCo viewer.
+Visualize motion clips using Gymnasium's MujocoRenderer.
 
 Replays each clip by setting qpos/qvel at every frame and calling mj_forward.
 Playback is paced to real-time by default; use --speed to change rate.
 
-Controls (focus the terminal, not the viewer window):
-  SPACE   pause / unpause
-  n       next clip
-  p       previous clip
-  r       restart current clip
-  q       quit
+Controls (in the viewer window):
+  SPACE        pause / unpause
+  RIGHT arrow  advance one step while paused
+  TAB          cycle cameras
+  ESC          quit
+
+Clip navigation (terminal):
+  n   next clip
+  p   previous clip
+  r   restart current clip
+  q   quit
 
 Usage:
     # single clip
@@ -26,39 +31,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-import threading
 import time
 from pathlib import Path
 
 import mujoco
-import mujoco.viewer
 import numpy as np
-
-
-# ---------------------------------------------------------------------------
-# Non-blocking keyboard input (Linux/macOS)
-# ---------------------------------------------------------------------------
-
-import select
-import termios
-import tty
-
-
-class KeyReader:
-    """Reads single keypresses from stdin without blocking the main loop."""
-
-    def __init__(self) -> None:
-        self._fd = sys.stdin.fileno()
-        self._old = termios.tcgetattr(self._fd)
-        tty.setraw(self._fd)
-
-    def read(self) -> str | None:
-        if select.select([sys.stdin], [], [], 0)[0]:
-            return sys.stdin.read(1)
-        return None
-
-    def close(self) -> None:
-        termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +49,7 @@ def find_clips(path: Path) -> list[Path]:
     clips = sorted(path.glob("*.npz"))
     if not clips:
         raise FileNotFoundError(f"No .npz files found in {path}")
-    return [Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_humanoid/humanoid_jog.npz")] #clips
+    return [Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_bro/humanoid_jog.npz")]  # clips
 
 
 def load_clip(path: Path) -> dict:
@@ -86,7 +64,51 @@ def load_clip(path: Path) -> dict:
         "root_ang_vel": d["root_ang_vel"].astype(np.float64),
         "dof_pos": d["dof_pos"].astype(np.float64),
         "dof_vel": d["dof_vel"].astype(np.float64),
+        "ctrl": d["ctrl"].astype(np.float64)
     }
+
+
+def clip_root_pos_offset(clip: dict) -> np.ndarray:
+    """Per-loop root translation so periodic clips advance in world x/y."""
+    delta = clip["root_pos"][-1] - clip["root_pos"][0]
+    delta[2] = 0.0
+    return delta
+
+
+def set_frame_qpos(
+    data: mujoco.MjData,
+    model: mujoco.MjModel,
+    clip: dict,
+    frame_idx: int,
+    root_pos_offset: np.ndarray,
+) -> None:
+    """Write clip frame into MjData and call mj_forward."""
+    qpos = np.concatenate([
+        clip["root_pos"][frame_idx] + root_pos_offset,
+        clip["root_rot"][frame_idx],
+        clip["dof_pos"][frame_idx],
+    ])
+    qvel = np.concatenate([
+        clip["root_vel"][frame_idx],
+        clip["root_ang_vel"][frame_idx],
+        clip["dof_vel"][frame_idx],
+    ])
+    data.qpos[:] = qpos
+    data.qvel[:] = qvel
+    mujoco.mj_forward(model, data)
+
+def set_frame(data: mujoco.MjData, model: mujoco.MjModel, clip: dict, frame_idx: int, root_pos_offset) -> None:
+    """Write clip frame into MjData and call mj_forward."""
+    for _ in range(4):
+        # Let actuators drive joints via ctrl
+        data.ctrl[:] = clip["ctrl"][frame_idx]
+        
+        # But pin the root to mocap (common during reference validation)
+        data.qpos[:7]  = np.concatenate([clip["root_pos"][frame_idx], clip["root_rot"][frame_idx]])
+        data.qvel[:6]  = np.concatenate([clip["root_vel"][frame_idx], clip["root_ang_vel"][frame_idx]])
+        
+        mujoco.mj_step(model, data)
+
 
 
 # ---------------------------------------------------------------------------
@@ -95,87 +117,74 @@ def load_clip(path: Path) -> dict:
 
 def run(clips: list[Path], xml_path: Path, speed: float) -> None:
     model = mujoco.MjModel.from_xml_path(str(xml_path))
+    model.opt.timestep = 1.0 / 120.0
+    model.opt.gravity = [0,0,0]
     data = mujoco.MjData(model)
 
+    renderer = MujocoRenderer(model, data)
+
     clip_idx = 0
-    frame_idx = 0
-    paused = False
-    advance = 0       # +1 next, -1 prev
-    restart = False
-
     clip = load_clip(clips[clip_idx])
+    n_frames = clip["dof_pos"].shape[0]
+    frame_idx = 0
+    root_pos_offset = np.zeros(3, dtype=np.float64)
 
-    keys = KeyReader()
-    print(f"\nPlaying: {clips[clip_idx].name}  ({clip['dof_pos'].shape[0]} frames @ {clip['fps']:.0f}fps)")
-    print("SPACE=pause  n=next  p=prev  r=restart  q=quit\n")
-    vals = []
-    with mujoco.viewer.launch_passive(model, data) as viewer:
-        last_frame_time = time.perf_counter()
+    print(f"\nPlaying: {clips[clip_idx].name}  ({n_frames} frames @ {clip['fps']:.0f} fps)")
+    print("Viewer window: SPACE=pause  RIGHT=step  TAB=camera  ESC=quit")
+    print("Terminal:      n=next clip  p=prev clip  r=restart  q=quit\n")
 
-        while viewer.is_running():
-            # --- keyboard ---
-            key = keys.read()
-            if key == " ":
-                paused = not paused
-                print("paused" if paused else "resumed")
-            elif key == "n":
-                advance = 1
-            elif key == "p":
-                advance = -1
-            elif key == "r":
-                restart = True
-            elif key in ("q", "\x03"):   # q or ctrl-c
-                break
+    last_frame_time = time.perf_counter()
 
-            # --- clip switching / restart ---
-            if advance != 0:
-                clip_idx = (clip_idx + advance) % len(clips)
-                clip = load_clip(clips[clip_idx])
-                frame_idx = 0
-                advance = 0
-                last_frame_time = time.perf_counter()
-                print(f"Playing: {clips[clip_idx].name}  ({clip['dof_pos'].shape[0]} frames @ {clip['fps']:.0f}fps)")
-
-            if restart:
-                frame_idx = 0
-                restart = False
-                last_frame_time = time.perf_counter()
-                print(f"Restarting: {clips[clip_idx].name}")
-
-            # --- frame advance ---
+    try:
+        while True:
             frame_dt = clip["dt"] / speed
             now = time.perf_counter()
 
-            if not paused and (now - last_frame_time) >= frame_dt:
+            if (now - last_frame_time) >= frame_dt:
                 last_frame_time += frame_dt
 
-                n_frames = clip["dof_pos"].shape[0]
-                frame_idx = frame_idx % n_frames
+                set_frame(data, model, clip, frame_idx, root_pos_offset)
+                renderer.render("human")
 
-                qpos = np.concatenate([clip["root_pos"][frame_idx], clip["root_rot"][frame_idx], clip["dof_pos"][frame_idx]])
-                qvel = np.concatenate([clip["root_vel"][frame_idx], clip["root_ang_vel"][frame_idx], clip["dof_vel"][frame_idx]])
+                next_frame_idx = (frame_idx + 1) % n_frames
+                if next_frame_idx == 0 and frame_idx == n_frames - 1:
+                    root_pos_offset += clip_root_pos_offset(clip)
+                frame_idx = next_frame_idx
 
-                data.qpos[:] = qpos
-                data.qvel[:] = qvel
-                mujoco.mj_forward(model, data)
-                viewer.sync()
+            # Non-blocking terminal input for clip navigation
+            import select
+            if select.select([sys.stdin], [], [], 0)[0]:
+                key = sys.stdin.read(1)
+                if key == "n":
+                    clip_idx = (clip_idx + 1) % len(clips)
+                    clip = load_clip(clips[clip_idx])
+                    n_frames = clip["dof_pos"].shape[0]
+                    frame_idx = 0
+                    root_pos_offset[:] = 0.0
+                    last_frame_time = time.perf_counter()
+                    print(f"Playing: {clips[clip_idx].name}  ({n_frames} frames @ {clip['fps']:.0f} fps)")
+                elif key == "p":
+                    clip_idx = (clip_idx - 1) % len(clips)
+                    clip = load_clip(clips[clip_idx])
+                    n_frames = clip["dof_pos"].shape[0]
+                    frame_idx = 0
+                    root_pos_offset[:] = 0.0
+                    last_frame_time = time.perf_counter()
+                    print(f"Playing: {clips[clip_idx].name}  ({n_frames} frames @ {clip['fps']:.0f} fps)")
+                elif key == "r":
+                    frame_idx = 0
+                    root_pos_offset[:] = 0.0
+                    last_frame_time = time.perf_counter()
+                    print(f"Restarting: {clips[clip_idx].name}")
+                elif key in ("q", "\x03"):
+                    break
 
-                vals.append(data.xpos[1][-1])
-
-                frame_idx += 1
-                if frame_idx >= n_frames:
-                    frame_idx = 0  # loop
-
-            # else:
-                # Sync at ~200 Hz when paused or waiting for next frame
-                # viewer.sync()
-                # time.sleep(0.005)
-
-    keys.close()
+    finally:
+        renderer.close()
 
 
 def main() -> None:
-    src = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_humanoid")
+    src = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_bro")
     xml_path = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid/humanoid.xml")
     speed = 1.0
 
@@ -190,3 +199,20 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# ****** ANTHONY TODO
+# Another thing to try is to collect position inputs ("What the policy is meant to be outputting")
+# and see if it works with this model -- it's new position servos and torques, etc. 
+# is it within the realm of possiblility for our policy. ***** 
+
+# decimation meaning my model outputs this value and we step the sim with the same output. 
+# that is about right.
+
+# what does that translate to. 
+# 
+# I want to see what it takes for the position servos to produce the motion.
+# NEED TO LOOK IN PRE PROCESS..  
+# 
+
+# TODO list:
+#2.) Verify I can rollout the motion, stepping 4 times in the sim.

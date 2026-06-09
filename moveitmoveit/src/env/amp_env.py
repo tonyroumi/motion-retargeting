@@ -47,13 +47,11 @@ class AMPEnv(MujocoEnv):
 
         self._ref_disc_obs = np.zeros((self.params.num_disc_obs_steps, disc_obs.shape[0]), dtype=np.float32)
 
-        self._current_clip_id = 0
-        self._current_frame_id = 0
-        self._motion_offset = 0.0
+        self._motion_clip_id = 0
+        self._motion_frame_id = 0
 
         self._timestep_buf = 0
         self._time_buf = 0
-        self._done = 0
 
     def clone(self):
         return AMPEnv(
@@ -69,50 +67,44 @@ class AMPEnv(MujocoEnv):
         options: dict | None = None,
     ) -> Tuple[np.ndarray, dict]:
         super().reset(seed=seed, options=options)
+        
+        self._timestep_buf = 0 
 
         qpos, qvel, frame_info = self.motion_lib.sample_start_state(rng=self.np_random)
-        self._current_clip_id = int(np.asarray(frame_info["clip_id"]).item())
-        self._current_frame_id = int(np.asarray(frame_info["frame_id"]).item())
-        self._motion_time = float(np.asarray(frame_info["motion_time"]).item())
+        self._motion_clip_id = int(np.asarray(frame_info["clip_id"]).item())
+        self._motion_frame_id = int(np.asarray(frame_info["motion_frames"]).item())
 
         self.sim.init_from_reference_motion(
             qpos, qvel,
         )
 
-        self._timestep_buf = self._motion_time / self.sim.timestep
-        self._time_buf = self._motion_time
-        self._done = 0
-
         obs = self._get_obs()
 
         # Discriminator observations are mixed with simulator state and motion lib window... TODO(better notes)
-        ref_disc_obs = self._fetch_ref_disc_obs(frame_info["clip_id"], frame_info["motion_time"])
+        ref_disc_obs = self._fetch_ref_disc_obs(frame_info["clip_id"], frame_info["motion_frames"])
         self._ref_disc_obs = ref_disc_obs.reshape(self.params.num_disc_obs_steps, -1)
 
         motion_ids = self.motion_lib.sample_motions(1, rng=self.np_random)
-        motion_times = self.motion_lib.sample_times(motion_ids, rng=self.np_random)
-        ref_disc_obs = self._fetch_ref_disc_obs(motion_ids, motion_times)
+        motion_frames = self.motion_lib.sample_frames(motion_ids, rng=self.np_random)
+        ref_disc_obs = self._fetch_ref_disc_obs(motion_ids, motion_frames)
 
         info = {
             "disc_obs": self._ref_disc_obs,
             "ref_disc_obs": ref_disc_obs,
-            "clip_id": self._current_clip_id,
-            "frame_id": self._current_frame_id,
+            "clip_id": self._motion_clip_id,
+            "frame_id": self._motion_frame_id,
         }
         return obs, info
 
-    def _fetch_ref_disc_obs(self, clip_id: np.ndarray, motion_time: np.ndarray) -> np.ndarray:
+    def _fetch_ref_disc_obs(self, clip_id: np.ndarray, motion_frames: np.ndarray) -> np.ndarray:
         """WHY DO WE DO THIS CLARIFYYYYYY"""
-        motion_ids = np.tile(clip_id[..., np.newaxis], [1, self.params.num_disc_obs_steps])
-
         # # Provided the timestep, obtain each state and next state for the observation window
-        curr_time = -self.sim.timestep * np.arange(0, self.params.num_disc_obs_steps)
-        curr_time = np.flip(curr_time, axis=[0]) # oldest -> newest (sequential order)
+        curr_frame = np.arange(0, self.params.num_disc_obs_steps)
 
-        motion_times = motion_time + curr_time
+        motion_frames = motion_frames + curr_frame
 
         root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, body_pos = (
-            self.motion_lib.get_frame_data(motion_ids, motion_times)
+            self.motion_lib.get_frame_data(clip_id, motion_frames)
         )
 
         root_rot = transforms.quat_pos(root_rot)
@@ -120,8 +112,8 @@ class AMPEnv(MujocoEnv):
 
         root_rot_norm = transforms.quat_to_tan_norm(root_rot)
         joint_rot_norm = transforms.quat_to_tan_norm(joint_rot)
-        ee_rel_pos = body_pos[:, :, self.skeleton.ee_ids] - root_pos[:, :, np.newaxis, :]
-        root_height = root_pos[:, :, -1]
+        ee_rel_pos = body_pos[:, self.skeleton.ee_ids, :] - root_pos[:, np.newaxis, :]
+        root_height = root_pos[:, -1]
 
         disc_obs = np.concatenate([
             root_rot_norm.ravel(),
@@ -138,8 +130,6 @@ class AMPEnv(MujocoEnv):
         self,
         action: np.ndarray,
     ) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        self._current_frame_id += 1
-
         obs, reward, terminated, truncated, _ = super().step(action)
 
         self._timestep_buf += 1
@@ -154,13 +144,13 @@ class AMPEnv(MujocoEnv):
         disc_obs = self._ref_disc_obs
 
         motion_ids = self.motion_lib.sample_motions(1, rng=self.np_random)
-        motion_times = self.motion_lib.sample_times(motion_ids, rng=self.np_random)
-        ref_disc_obs = self._fetch_ref_disc_obs(motion_ids, motion_times)
+        motion_frames = self.motion_lib.sample_frames(motion_ids, rng=self.np_random)
+        ref_disc_obs = self._fetch_ref_disc_obs(motion_ids, motion_frames)
 
         info = {
             "disc_obs": disc_obs,
             "ref_disc_obs": ref_disc_obs,
-            "motion_frame": self._current_frame_id,
+            "motion_frame": self._motion_frame_id,
         }
         return obs, reward, terminated, truncated, info
 
@@ -200,68 +190,34 @@ class AMPEnv(MujocoEnv):
 
     def _compute_tracking_cost(self) -> float:
         """Squared tracking error vs the current reference motion frame."""
-        clip_id = self._current_clip_id
-        frame_id = self._current_frame_id
-        ref = self.motion_lib.get_frame_state(clip_id, frame_id)
+        current_frame = self._motion_frame_id + self._timestep_buf 
+        
+        ref = self.motion_lib.get_frame_state(self._motion_clip_id, current_frame)
 
-        ref_root_pos = ref["root_pos"]
+        # ref_root_pos = ref["root_pos"]
         ref_root_rot = transforms.quat_pos(ref["root_rot"])
-        sim_root_pos = self.sim.root_pos
+        # sim_root_pos = self.sim.root_pos
         sim_root_rot = transforms.quat_pos(self.sim.root_quat)
 
-        ref_pos_local = np.array([0.0, 0.0, ref_root_pos[2]], dtype=np.float64)
-        sim_pos_local = transforms.transform_positions_to_root_frame(
-            sim_root_pos, ref_root_pos, ref_root_rot,
-        )
-        root_pos_err = sim_pos_local - ref_pos_local
-
-        ref_rot_h = transforms.quat_mul(
-            transforms.calc_heading_quat_inv(ref_root_rot), ref_root_rot,
-        )
-        sim_rot_h = transforms.quat_mul(
-            transforms.calc_heading_quat_inv(sim_root_rot), sim_root_rot,
-        )
-        root_rot_err = transforms.quat_to_exp_map(
-            transforms.quat_diff(ref_rot_h, sim_rot_h),
-        )
-
-        ref_root_vel_h = transforms.transform_velocities_to_root_frame(
-            ref["root_vel"], ref_root_rot,
-        )
-        sim_root_vel_h = transforms.transform_velocities_to_root_frame(
-            self.sim.root_vel, ref_root_rot,
-        )
-        root_vel_err = sim_root_vel_h - ref_root_vel_h
+        # root_pos_err = sim_root_pos - ref_root_pos
+        root_rot_err = sim_root_rot - ref_root_rot
 
         ref_joint_rot = transforms.quat_pos(ref["joint_rot"])
         sim_joint_rot = transforms.quat_pos(
             self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0],
         )
-        joint_rot_err = transforms.quat_to_exp_map(
-            transforms.quat_diff(ref_joint_rot, sim_joint_rot),
-        )
+        joint_rot_err =  sim_joint_rot - ref_joint_rot
 
         dof_vel_err = self.sim.dof_vel - ref["dof_vel"]
 
-        ref_ee_h = transforms.transform_positions_to_root_frame(
-            ref["body_pos"][self.skeleton.ee_ids],
-            ref_root_pos,
-            ref_root_rot,
-        )
-        sim_ee_h = transforms.transform_positions_to_root_frame(
-            self.sim.ee_positions,
-            ref_root_pos,
-            ref_root_rot,
-        )
-        ee_pos_err = sim_ee_h - ref_ee_h
+        # ee_pos_err = self.sim.ee_positions - ref["body_pos"][self.skeleton.ee_ids]
 
         cost = (
-            self.params.tracking_root_pos_weight * np.mean(np.square(root_pos_err))
+            # self.params.tracking_root_pos_weight * np.mean(np.square(root_pos_err))
             + self.params.tracking_root_rot_weight * np.mean(np.square(root_rot_err))
-            + self.params.tracking_root_vel_weight * np.mean(np.square(root_vel_err))
             + self.params.tracking_joint_rot_weight * np.mean(np.square(joint_rot_err))
             + self.params.tracking_dof_vel_weight * np.mean(np.square(dof_vel_err))
-            + self.params.tracking_ee_pos_weight * np.mean(np.square(ee_pos_err))
+            # + self.params.tracking_ee_pos_weight * np.mean(np.square(ee_pos_err))
         )
         return float(cost)
 

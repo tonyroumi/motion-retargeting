@@ -68,7 +68,7 @@ class MotionLibrary:
             dof_vel = clip.dof_vel
 
             motion_lengths.append([curr_len])
-            motion_root_pos_delta.append(root_pos_delta)
+            motion_root_pos_delta.append([root_pos_delta])
             motion_num_frames.append(np.atleast_1d(num_frames))
             
             frame_root_pos.append(root_pos)
@@ -140,7 +140,7 @@ class MotionLibrary:
         motion_ids = gen.choice(len(self._clips), size=n, p=self._weights)
         return motion_ids
 
-    def sample_times(
+    def sample_frames(
         self,
         motion_ids: List[int],
         rng: np.random.Generator | int | np.ndarray | None = None,
@@ -149,12 +149,9 @@ class MotionLibrary:
         Uniformly sample *n* (clip_index, time) pairs,
         weighted by clip duration.
         """
+        number_frames = self._motion_num_frames[motion_ids]
         gen = self._resolve_rng(rng)
-        phase = gen.random(len(motion_ids))
-        lengths = self._motion_lengths[motion_ids]
-
-        start_times = phase * lengths
-        return start_times
+        return gen.integers(low=0, high=number_frames)
 
     def sample_start_state(
         self,
@@ -163,39 +160,43 @@ class MotionLibrary:
         """ Sample a single random starting state for episode initialisation. """
         gen = self._resolve_rng(rng)
         motion_ids = self.sample_motions(1, rng=gen)
-        motion_times = self.sample_times(motion_ids, rng=gen)
-
-        frame_idx = self._compute_frame_from_time(motion_ids, motion_times)
+        motion_frames = self.sample_frames(motion_ids, rng=gen)
 
         frame_info = {
             "clip_id": motion_ids,
-            "frame_id": frame_idx,
-            "motion_time": motion_times,
+            "motion_frames": motion_frames,
         }
 
         qpos = np.concatenate([
-            self._frame_root_pos[frame_idx], 
-            self._frame_root_rot[frame_idx], 
-            self._frame_joint_dof[frame_idx],
+            self._frame_root_pos[motion_frames], 
+            self._frame_root_rot[motion_frames], 
+            self._frame_joint_dof[motion_frames],
         ], axis=-1)
         qvel = np.concatenate([
-            self._frame_root_vel[frame_idx], 
-            self._frame_root_ang_vel[frame_idx], 
-            self._frame_dof_vel[frame_idx],
+            self._frame_root_vel[motion_frames], 
+            self._frame_root_ang_vel[motion_frames], 
+            self._frame_dof_vel[motion_frames],
         ], axis=-1)
 
         return qpos, qvel, frame_info
 
-    def get_frame_data(self, motion_ids, motion_times):
-        frame_idx = self._compute_frame_from_time(motion_ids, motion_times)
+    def get_frame_data(self, clip_ids, motion_frames):
+        num_frames = self._motion_num_frames[clip_ids]
 
-        root_pos = self._frame_root_pos[frame_idx]
-        root_rot = self._frame_root_rot[frame_idx]
-        root_vel = self._frame_root_vel[frame_idx]
-        root_ang_vel = self._frame_root_ang_vel[frame_idx]
-        joint_rot = self._frame_joint_rot[frame_idx]
-        dof_vel = self._frame_dof_vel[frame_idx]
-        body_pos = self._frame_body_pos[frame_idx]
+        wrapped_frames = motion_frames % num_frames
+        num_wraps = motion_frames // num_frames
+
+        root_pos = self._frame_root_pos[wrapped_frames].copy()
+        root_rot = self._frame_root_rot[wrapped_frames]
+        root_vel = self._frame_root_vel[wrapped_frames]
+        root_ang_vel = self._frame_root_ang_vel[wrapped_frames]
+        joint_rot = self._frame_joint_rot[wrapped_frames]
+        dof_vel = self._frame_dof_vel[wrapped_frames]
+        body_pos = self._frame_body_pos[wrapped_frames].copy()
+
+        root_pos += num_wraps[:, np.newaxis] * self._motion_root_pos_delta[clip_ids]
+
+        body_pos += num_wraps[:, np.newaxis, np.newaxis] * self._motion_root_pos_delta[clip_ids]
 
         return root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, body_pos
 
