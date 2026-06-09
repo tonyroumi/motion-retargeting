@@ -195,18 +195,16 @@ class AMPEnv(MujocoEnv):
         ref = self.motion_lib.get_frame_state(self._motion_clip_id, current_frame)
 
         # ref_root_pos = ref["root_pos"]
-        ref_root_rot = transforms.quat_pos(ref["root_rot"])
         # sim_root_pos = self.sim.root_pos
-        sim_root_rot = transforms.quat_pos(self.sim.root_quat)
 
         # root_pos_err = sim_root_pos - ref_root_pos
-        root_rot_err = sim_root_rot - ref_root_rot
+        root_rot_err = self.sim.root_quat - ref["root_rot"]
 
         ref_joint_rot = transforms.quat_pos(ref["joint_rot"])
-        sim_joint_rot = transforms.quat_pos(
-            self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0],
-        )
-        joint_rot_err =  sim_joint_rot - ref_joint_rot
+        sim_joint_rot = self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0]#transforms.quat_pos(
+           # self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0],
+        #)
+        joint_rot_err =  sim_joint_rot - ref["joint_rot"]
 
         dof_vel_err = self.sim.dof_vel - ref["dof_vel"]
 
