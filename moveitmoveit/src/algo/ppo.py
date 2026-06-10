@@ -28,6 +28,7 @@ class PPO(BaseAlgo):
 
         self.transition = Transition()
         self._update_count = 0
+        self._prev_terminated = None
 
     def init_storage(
         self,
@@ -70,11 +71,22 @@ class PPO(BaseAlgo):
         self.logger.log_metric("reward/total_mean", rewards.mean().item())
         self.logger.log_metric("reward/total_std", rewards.std().item())
 
+        if self._prev_terminated is None:
+            self._prev_terminated = torch.zeros_like(terminated, dtype=torch.bool)
+
+        # With NEXT_STEP autoreset, the step after a termination is fabricated:
+        # the env discarded the action and returned the new episode's reset obs.
+        # Mask those transitions out of the PPO update.
+        self.transition.valid = ~self._prev_terminated
+        self.logger.log_metric("ppo/masked_fraction", self._prev_terminated.float().mean().item())
+
         self.transition.rewards = rewards.clone().detach()
         self.transition.terminated = terminated.clone().detach()
         self.transition.truncated = truncated.clone().detach()
         self.storage.add(self.transition)
         self.transition = Transition()
+
+        self._prev_terminated = terminated.clone().detach().bool()
 
     def compute_returns(self, last_values: torch.Tensor) -> None:
         advantage = 0

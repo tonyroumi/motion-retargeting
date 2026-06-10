@@ -21,6 +21,7 @@ class Transition:
     actions_log_prob: torch.Tensor = None
     action_mean: torch.Tensor = None
     action_sigma: torch.Tensor = None
+    valid: torch.Tensor = None
 
 class RolloutBuffer(BaseBuffer):
     """Fixed-length storage for rollout data.
@@ -49,6 +50,10 @@ class RolloutBuffer(BaseBuffer):
         self.mu = torch.zeros(num_transitions, num_envs, action_dim, device=device)
         self.sigma = torch.zeros(num_transitions, num_envs, action_dim, device=device)
 
+        # Transitions fabricated by autoreset are marked invalid and excluded
+        # from the mini-batches.
+        self.valid = torch.ones(num_transitions, num_envs, 1, device=device, dtype=torch.bool)
+
         # Computed during advantage estimation
         self.returns = torch.zeros(num_transitions, num_envs, 1, device=device)
         self.advantages = torch.zeros(num_transitions, num_envs, 1, device=device)
@@ -69,6 +74,10 @@ class RolloutBuffer(BaseBuffer):
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
         self.sigma[self.step].copy_(transition.action_sigma)
+        if transition.valid is not None:
+            self.valid[self.step].copy_(transition.valid.view(-1, 1))
+        else:
+            self.valid[self.step].fill_(True)
         self.step += 1
 
     def add_advantage(self, advantage: torch.Tensor) -> None:
@@ -98,9 +107,6 @@ class RolloutBuffer(BaseBuffer):
         ------
         obs, actions, values, advantages, returns, old_log_prob, old_mu, old_sigma
         """
-        batch_size = self.num_envs * self.num_transitions
-        mini_batch_size = batch_size // num_mini_batches
-
         # Flatten time × envs
         observations = self.observations.flatten(0, 1)
         actions = self.actions.flatten(0, 1)
@@ -111,17 +117,18 @@ class RolloutBuffer(BaseBuffer):
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
 
-        indices = torch.randperm(
-            num_mini_batches * mini_batch_size,
-            requires_grad=False,
-            device=self.device,
-        )
+        # Sample only valid transitions (autoreset steps are masked out).
+        valid_indices = self.valid.flatten(0, 1).squeeze(-1).nonzero(as_tuple=False).squeeze(-1)
+        num_valid = valid_indices.numel()
+        mini_batch_size = num_valid // num_mini_batches
+
+        perm = torch.randperm(num_valid, device=self.device)
 
         for _ in range(num_epochs):
             for i in range(num_mini_batches):
                 start = i * mini_batch_size
                 end = start + mini_batch_size
-                idx = indices[start:end]
+                idx = valid_indices[perm[start:end]]
 
                 yield (
                     observations[idx],
