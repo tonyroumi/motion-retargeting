@@ -203,16 +203,25 @@ class MotionLibrary:
     def get_frame_state(self, clip_id: int, frame_id: int) -> dict:
         """Kinematic state for a single frame within a clip."""
         clip = self._clips[int(clip_id)]
-        frame_id = int(np.clip(frame_id, 0, clip.num_frames - 1))
-        joint_dof = clip.frames[frame_id : frame_id + 1]
-        return {
-            "root_pos": clip.root_pos[frame_id],
-            "root_rot": clip.root_rot[frame_id],
-            "root_vel": clip.root_vel[frame_id],
-            "root_ang_vel": clip.root_ang_vel[frame_id],
-            "joint_dof": clip.frames[frame_id],
-            "joint_rot": self._skeleton.dof_to_rot(joint_dof)[0],
-            "dof_vel": clip.dof_vel[frame_id],
-            "body_pos": clip.body_pos[frame_id],
-        }
 
+        wrapped_frames = frame_id % clip.num_frames
+        num_wraps = frame_id // clip.num_frames
+        
+        joint_dof = clip.frames[wrapped_frames : wrapped_frames + 1]
+
+        root_pos = clip.root_pos[wrapped_frames].copy()
+        body_pos = clip.body_pos[wrapped_frames].copy()
+
+        root_pos += num_wraps * self._motion_root_pos_delta[clip_id]
+        body_pos += num_wraps * self._motion_root_pos_delta[clip_id]
+        
+        return {
+            "root_pos": root_pos,
+            "root_rot": clip.root_rot[wrapped_frames],
+            "root_vel": clip.root_vel[wrapped_frames],
+            "root_ang_vel": clip.root_ang_vel[wrapped_frames],
+            "joint_dof": clip.frames[wrapped_frames],
+            "joint_rot": self._skeleton.dof_to_rot(joint_dof)[0],
+            "dof_vel": clip.dof_vel[wrapped_frames],
+            "body_pos": body_pos,
+        }

@@ -81,8 +81,7 @@ class AMPEnv(MujocoEnv):
         obs = self._get_obs()
 
         # Discriminator observations are mixed with simulator state and motion lib window... TODO(better notes)
-        ref_disc_obs = self._fetch_ref_disc_obs(frame_info["clip_id"], frame_info["motion_frames"])
-        self._ref_disc_obs = ref_disc_obs.reshape(self.params.num_disc_obs_steps, -1)
+        self._ref_disc_obs = self._fetch_ref_disc_obs(frame_info["clip_id"], frame_info["motion_frames"])
 
         motion_ids = self.motion_lib.sample_motions(1, rng=self.np_random)
         motion_frames = self.motion_lib.sample_frames(motion_ids, rng=self.np_random)
@@ -116,14 +115,14 @@ class AMPEnv(MujocoEnv):
         root_height = root_pos[:, -1]
 
         disc_obs = np.concatenate([
-            root_rot_norm.ravel(),
-            root_vel.ravel(),
-            root_ang_vel.ravel(),
-            joint_rot_norm.ravel(),
-            dof_vel.ravel(),
-            ee_rel_pos.ravel(),
-            root_height.ravel(),
-        ])
+            root_rot_norm,
+            root_vel,
+            root_ang_vel,
+            joint_rot_norm.reshape(self.params.num_disc_obs_steps, -1),
+            dof_vel,
+            ee_rel_pos.reshape(self.params.num_disc_obs_steps, -1),
+            root_height[:, np.newaxis],
+        ], axis=-1)
         return disc_obs.astype(np.float32)
 
     def step(
@@ -194,28 +193,21 @@ class AMPEnv(MujocoEnv):
         
         ref = self.motion_lib.get_frame_state(self._motion_clip_id, current_frame)
 
-        # ref_root_pos = ref["root_pos"]
-        # sim_root_pos = self.sim.root_pos
-
-        # root_pos_err = sim_root_pos - ref_root_pos
+        root_pos_err = self.sim.root_pos - ref["root_pos"]
         root_rot_err = self.sim.root_quat - ref["root_rot"]
 
-        ref_joint_rot = transforms.quat_pos(ref["joint_rot"])
-        sim_joint_rot = self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0]#transforms.quat_pos(
-           # self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0],
-        #)
+        sim_joint_rot = self.skeleton.dof_to_rot(self.sim.dof_pos[np.newaxis])[0]
+        
         joint_rot_err =  sim_joint_rot - ref["joint_rot"]
-
         dof_vel_err = self.sim.dof_vel - ref["dof_vel"]
-
-        # ee_pos_err = self.sim.ee_positions - ref["body_pos"][self.skeleton.ee_ids]
+        ee_pos_err = self.sim.ee_positions - ref["body_pos"][self.skeleton.ee_ids]
 
         cost = (
-            # self.params.tracking_root_pos_weight * np.mean(np.square(root_pos_err))
+            self.params.tracking_root_pos_weight * np.mean(np.square(root_pos_err))
             + self.params.tracking_root_rot_weight * np.mean(np.square(root_rot_err))
             + self.params.tracking_joint_rot_weight * np.mean(np.square(joint_rot_err))
             + self.params.tracking_dof_vel_weight * np.mean(np.square(dof_vel_err))
-            # + self.params.tracking_ee_pos_weight * np.mean(np.square(ee_pos_err))
+            + self.params.tracking_ee_pos_weight * np.mean(np.square(ee_pos_err))
         )
         return float(cost)
 

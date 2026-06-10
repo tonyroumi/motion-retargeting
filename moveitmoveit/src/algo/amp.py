@@ -60,17 +60,9 @@ class AMP(PPO):
         truncated: torch.Tensor,
         infos: dict | None = None,
     ) -> None:
-
-        num_samples = infos["disc_obs"].shape[0]
-        rand_idx = torch.randperm(num_samples, device=self.networks.device, dtype=torch.long)
-
-        if (self.discriminator_storage.is_full):
-            num_samples = min(num_samples, self.params.disc_replay_samples) 
-        
-        idx = rand_idx[:num_samples]
-
-        stacked_disc_obs = self.discriminator_storage.add(infos["disc_obs"][idx])
-        ref_disc_obs = self.discriminator_ref_storage.add(infos["ref_disc_obs"][idx])
+    
+        stacked_disc_obs = self.discriminator_storage.add(infos["disc_obs"])
+        ref_disc_obs = self.discriminator_ref_storage.add(infos["ref_disc_obs"])
 
         self.networks.record_disc_obs(stacked_disc_obs)
         self.networks.record_disc_obs(ref_disc_obs)
@@ -85,6 +77,7 @@ class AMP(PPO):
         goal_reward = rewards.clone() * self.params.goal_reward_lambda
         rewards = disc_reward.detach() + goal_reward
 
+        self.logger.log_metric("disc/inferece_d", d.mean().item())
         self.logger.log_metric("disc/reward_prob", prob.mean().item())
 
         self.logger.log_metric("reward/disc_mean", disc_reward.mean().item())
@@ -128,14 +121,14 @@ class AMP(PPO):
             )
             disc_loss = 0.5 * (agent_loss + ref_loss)
 
-            # logit_weights = self.networks.discriminator.get_logit_weights()
-            # disc_logit_loss = torch.sum(torch.square(logit_weights))
-            # disc_loss += self.params.disc_logit_reg * disc_logit_loss
+            logit_weights = self.networks.discriminator.get_logit_weights()
+            disc_logit_loss = torch.sum(torch.square(logit_weights))
+            disc_loss += self.params.disc_logit_reg * disc_logit_loss
 
-            # disc_weight_decay = sum(
-                # p.pow(2).sum() for p in self.networks.discriminator.parameters()
-            # )
-            # disc_loss += self.params.disc_weight_decay * disc_weight_decay
+            disc_weight_decay = sum(
+                p.pow(2).sum() for p in self.networks.discriminator.parameters()
+            )
+            disc_loss += self.params.disc_weight_decay * disc_weight_decay
 
             # gradient penalty
             disc_ref_grad = torch.autograd.grad(
