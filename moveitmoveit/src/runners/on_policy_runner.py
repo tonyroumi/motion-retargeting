@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from typing import List
@@ -24,6 +25,7 @@ class OnPolicyRunnerParams(BaseParams):
     checkpoint_interval: int = 100  # iterations between saves
 
     device: str = "cpu"
+    seed: int = 0
 
 class OnPolicyRunner:
     """Generic on-policy training loop. """
@@ -42,6 +44,8 @@ class OnPolicyRunner:
 
         obs_dim = environment.observation_space.shape[-1]
         action_dim = environment.action_space.shape[-1]
+
+        self._set_seeds(self.params.seed)
 
         self.algo.to_device(self.params.device)
         self.algo.init_storage(
@@ -66,7 +70,6 @@ class OnPolicyRunner:
         total_iterations = self.params.total_timesteps // steps_per_iter
 
         obs, info = self.env.reset()
-        self.algo.process_reset(info)
 
         train_start = time.perf_counter()
 
@@ -87,8 +90,6 @@ class OnPolicyRunner:
                     truncated=truncated,
                     infos=info,
                 )
-
-                self.logger.step()
             
             # compute returns and update
             with torch.no_grad():
@@ -131,3 +132,11 @@ class OnPolicyRunner:
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.current_iteration = ckpt["iteration"]
         self.current_timestep = ckpt["timestep"]
+    
+    def _set_seeds(self, seed: int) -> None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True

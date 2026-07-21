@@ -6,9 +6,15 @@ defaults:
 
 runner:
   num_transitions_per_env: 32
-  total_timesteps: 200000000
+  total_timesteps: 500000000
   log_interval: 10
   checkpoint_interval: 500
   device: "cuda"
 
-description: "I changed from orthogonal initialization to uniform initialization with the appropriate gains. "
+description:
+  - "Actions are now residual around default pose / sampled pose. No tracking reward anymore only DISC."
+
+#TODO
+# investigate why agent logits are saturating below -9 and ref logits are at 2.4. 
+# what affect does this have on 1.) training discriminator and 2.) discriminator reward.
+

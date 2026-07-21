@@ -34,6 +34,8 @@ class MujocoEnv(gym.Env):
         self.sim = MujocoInterface(self.skeleton, self._mj_data, params=params)
         self.params = params
 
+        self._init_pose = self.skeleton.default_pose
+
         self._episode_step = 0
 
         a_low, a_high = self.skeleton.compute_action_bounds()
@@ -84,7 +86,7 @@ class MujocoEnv(gym.Env):
         a = np.asarray(action, dtype=np.float64)
         low = self.action_space.low
         high = self.action_space.high
-        return np.minimum(np.maximum(a, low), high) #this is just clipping
+        return self._init_pose + np.minimum(np.maximum(a, low), high)
 
     def render(self):
         return self.mujoco_renderer.render(self.render_mode)

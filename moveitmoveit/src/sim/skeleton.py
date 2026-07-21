@@ -68,10 +68,7 @@ class Skeleton:
         self._bodies: List[Body] = []
         self._ee_ids = self._find_ee_bodies()
 
-        init_pose = model.key_qpos[0].copy()
-        self._init_root_pose = init_pose[:3]
-        self._init_root_rot = init_pose[3:7]
-        self._init_dof_pos = init_pose[7:]
+        self.default_pose = model.key_qpos[0].copy()
 
         self._parse()
 

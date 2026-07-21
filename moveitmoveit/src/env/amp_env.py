@@ -77,11 +77,11 @@ class AMPEnv(MujocoEnv):
         self.sim.init_from_reference_motion(
             qpos, qvel,
         )
+        self._init_pose = qpos[0][7:] 
 
         obs = self._get_obs()
 
-        # Discriminator observations are mixed with simulator state and motion lib window... TODO(better notes)
-        self._ref_disc_obs = self._fetch_ref_disc_obs(frame_info["clip_id"], frame_info["motion_frames"])
+        self._ref_disc_obs = np.stack([self._get_obs() for _ in range(self.params.num_disc_obs_steps)], axis=0)
 
         motion_ids = self.motion_lib.sample_motions(1, rng=self.np_random)
         motion_frames = self.motion_lib.sample_frames(motion_ids, rng=self.np_random)
@@ -124,14 +124,16 @@ class AMPEnv(MujocoEnv):
             root_height[:, np.newaxis],
         ], axis=-1)
         return disc_obs.astype(np.float32)
+        
 
     def step(
         self,
         action: np.ndarray,
     ) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        self._timestep_buf += 1
+
         obs, reward, terminated, truncated, _ = super().step(action)
 
-        self._timestep_buf += 1
         self._time_buf = self.sim.timestep * self._timestep_buf
 
         # Circular buffer

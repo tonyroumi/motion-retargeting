@@ -130,7 +130,6 @@ class MujocoInterface(SimInterface):
         self._data.time = state["time"]
         mujoco.mj_forward(self._model, self._data)
 
-
     def init_from_reference_motion(
         self,
         ref_qpos: np.ndarray,

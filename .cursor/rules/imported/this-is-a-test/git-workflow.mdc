@@ -1,0 +1,62 @@
+---
+description: GitHub issue, branch, commit, and PR workflow
+alwaysApply: true
+---
+
+# Git workflow
+
+Every change must be tied to a GitHub issue.
+
+## Branch naming
+
+Use:
+
+`<type>/<issue-number>-<short-kebab-description>`
+
+Allowed types:
+
+- `feature`
+- `bugfix`
+- `fix`
+- `refactor`
+- `test`
+- `docs`
+- `chore`
+
+Examples:
+
+- `feature/42-add-user-auth`
+- `bugfix/87-fix-null-track-state`
+- `refactor/103-split-fusion-service`
+- `test/118-add-parser-regression-tests`
+
+## Commit messages
+
+Use Conventional Commit style and include the issue number.
+
+Format:
+
+`<type>(#<issue-number>): <imperative summary>`
+
+Examples:
+
+- `fix(#87): handle missing sensor timestamp`
+- `feature(#42): add user auth endpoint`
+- `test(#118): add parser regression coverage`
+- `refactor(#103): split fusion service initialization`
+
+## Pull requests
+
+PR title format:
+
+`<type>(#<issue-number>): <summary>`
+
+PR body must include:
+
+`Closes #<issue-number>`
+
+Example:
+
+`Closes #87`
+
+Use one issue per PR unless the issues are tightly coupled.

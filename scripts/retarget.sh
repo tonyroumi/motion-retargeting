@@ -1,6 +1,6 @@
 python retargeting/retarget.py \
-  --model "outputs/character1_to_Karim/2026-01-20/21-16-44/skeletal_gan_epoch1800.pt" \
-  --source-skeleton retargeting/data/skeletons/character1.npz \
-  --target-skeleton retargeting/data/skeletons/Karim.npz \
-  --motion retargeting/data/bandai/processed/character1/dataset-1_walk_active_001.npz \
-  --output-dir outputs/retargeting/character1_to_Karim_tiny1
+  --model "/home/tonyroumi/Desktop/move-it-move-it/retargeting/outputs/character2_to_Rub/2026-03-21/22-32-10/skeletal_gan_epoch10500.pt" \
+  --source-skeleton retargeting/data/skeletons/character2.npz \
+  --target-skeleton retargeting/data/skeletons/Rub.npz \
+  --motion /home/tonyroumi/Desktop/move-it-move-it/retargeting/data/bandai/processed/character2/dataset-2_raise-up-left-hand_feminine_051.npz\
+  --output-dir outputs/retargeting/character2toRub

@@ -23,7 +23,7 @@ class AMP(PPO):
     ):  
         super().__init__(networks, params, logger)
         
-        self._discriminator_update_count = 0
+        self._disc_grad_step = 0
 
     def init_storage(
         self,
@@ -147,6 +147,7 @@ class AMP(PPO):
             optimizer.zero_grad()
             disc_loss.backward()
             optimizer.step()
+            self._disc_grad_step += 1
 
             agent_accuracy = torch.mean((agent_logits < 0).float())
             ref_disc_accuracy = torch.mean((ref_logits > 0).float()) 

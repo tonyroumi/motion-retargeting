@@ -27,7 +27,7 @@ class PPO(BaseAlgo):
         super().__init__(networks, params, logger)
 
         self.transition = Transition()
-        self._update_count = 0
+        self._grad_step = 0
         self._prev_terminated = None
 
     def init_storage(
@@ -58,7 +58,7 @@ class PPO(BaseAlgo):
         self.transition.action_mean = self.networks.action_mean.detach()
         self.transition.action_sigma = self.networks.action_std.detach()
         self.transition.observations = normed_obs.detach()
-        
+
         return actions 
 
     def process_env_step(
@@ -131,8 +131,6 @@ class PPO(BaseAlgo):
         mean_exact_kl = 0
         mean_clip_fraction = 0
         mean_explained_variance = 0
-        mean_grad_norm_before_clip = 0
-        mean_grad_norm_after_clip = 0
 
         # Ratio statistics
         mean_ratio_mean = 0
@@ -191,7 +189,7 @@ class PPO(BaseAlgo):
                     advantages_batch.std() + 1e-8
                 )
             # They clip advange for some reason. WHY do they do this?
-            # TODO
+            # TODO 
 
             # --- Forward passes ---
             self.networks.act(observations_batch) #update distribution from OLD samples
@@ -291,19 +289,18 @@ class PPO(BaseAlgo):
 
             all_params = list(self.networks.parameters())
 
-            grad_norm_before = torch.norm(
-                torch.stack(
-                    [p.grad.detach().norm() for p in all_params if p.grad is not None]
-                )
-            ).item()
-            mean_grad_norm_before_clip += grad_norm_before
+            self.logger.log_grads(self.networks.actor, prefix="grad/before_clip")
+            self.logger.log_grads(self.networks.critic, prefix="grad/before_clip")
 
             grad_norm_after = nn.utils.clip_grad_norm_(
                 all_params, self.params.max_grad_norm
             ).item()
-            mean_grad_norm_after_clip += min(grad_norm_after, self.params.max_grad_norm)
+
+            self.logger.log_grads(self.networks.actor, prefix="grad/after_clip")
+            self.logger.log_grads(self.networks.critic, prefix="grad/after_clip")
 
             optimizer.step()
+            self._grad_step += 1
 
             # --- Accumulate core losses ---
             mean_value_loss += value_loss.item()
@@ -320,8 +317,6 @@ class PPO(BaseAlgo):
         mean_exact_kl /= num_updates
         mean_clip_fraction /= num_updates
         mean_explained_variance /= num_updates
-        mean_grad_norm_before_clip /= num_updates
-        mean_grad_norm_after_clip /= num_updates
         mean_ratio_mean /= num_updates
         mean_ratio_std /= num_updates
         mean_ratio_min /= num_updates
@@ -370,10 +365,10 @@ class PPO(BaseAlgo):
         # self.logger.log_metric("log_prob/new_std", mean_new_log_prob_std)
 
         # Advantage diagnostics (pre-normalization)
-        self.logger.log_metric("ppo/advantage/mean", mean_advantage_mean)
-        self.logger.log_metric("ppo/advantage/std", mean_advantage_std)
-        self.logger.log_metric("ppo/advantage/min", mean_advantage_min)
-        self.logger.log_metric("ppo/advantage/max", mean_advantage_max)
+        # self.logger.log_metric("ppo/advantage/mean", mean_advantage_mean)
+        # self.logger.log_metric("ppo/advantage/std", mean_advantage_std)
+        # self.logger.log_metric("ppo/advantage/min", mean_advantage_min)
+        # self.logger.log_metric("ppo/advantage/max", mean_advantage_max)
 
         # Value function quality
         # self.logger.log_metric("value/explained_variance", mean_explained_variance)

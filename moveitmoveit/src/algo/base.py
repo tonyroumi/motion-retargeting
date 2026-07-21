@@ -24,6 +24,8 @@ class BaseAlgo(ABC):
         self.params = params
         self.logger = logger
 
+        self._update_count = 0 
+
     def to_device(self, device: str):
         self.networks.to_device(device)
 

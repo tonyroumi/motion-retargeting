@@ -1,0 +1,17 @@
+---
+description: General coding standards for this repository
+alwaysApply: true
+---
+
+# General code standards
+
+- Prefer small, focused changes.
+- Preserve existing architecture and naming patterns.
+- Match the style of nearby code.
+- Avoid speculative abstractions.
+- Avoid large refactors unless explicitly requested.
+- Keep functions short and single-purpose when practical.
+- Prefer clear names over clever names.
+- Do not introduce new dependencies without explaining why.
+- Do not leave TODOs unless the issue explicitly asks for follow-up work.
+- No dead code, commented-out code, debug prints, or unrelated formatting churn.

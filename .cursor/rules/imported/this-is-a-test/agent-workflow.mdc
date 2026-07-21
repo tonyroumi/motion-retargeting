@@ -1,0 +1,22 @@
+---
+description: Required workflow for all agent coding tasks
+alwaysApply: true
+---
+
+# Agent workflow
+
+When given a GitHub issue, follow this process:
+
+1. Read the issue title, description, acceptance criteria, and linked files.
+2. Inspect the existing implementation before proposing changes.
+3. Identify the smallest safe change that satisfies the issue.
+4. Do not rewrite unrelated code.
+5. Do not change public APIs unless the issue explicitly requires it.
+6. Add or update tests for behavior changes.
+7. Run the relevant formatter, linter, build, and tests before finalizing.
+8. Summarize:
+   - what changed
+   - why it changed
+   - tests run
+   - any risks or follow-up work
+
