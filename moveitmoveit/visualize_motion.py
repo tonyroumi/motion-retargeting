@@ -49,7 +49,7 @@ def find_clips(path: Path) -> list[Path]:
     clips = sorted(path.glob("*.npz"))
     if not clips:
         raise FileNotFoundError(f"No .npz files found in {path}")
-    return [Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_bro/humanoid_jog.npz")]  # clips
+    return [Path("/home/anthony/Dev/move-it-move-it/moveitmoveit/data/better_humanoid/humanoid_jog.npz")]  # clips
 
 
 def load_clip(path: Path) -> dict:
@@ -184,8 +184,8 @@ def run(clips: list[Path], xml_path: Path, speed: float) -> None:
 
 
 def main() -> None:
-    src = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_bro")
-    xml_path = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid/humanoid.xml")
+    src = Path("/home/anthony/Dev/move-it-move-it/moveitmoveit/data/better_humanoid")
+    xml_path = Path("/home/anthony/Dev/move-it-move-it/moveitmoveit/data/humanoid/humanoid.xml")
     speed = 1.0
 
     clips = find_clips(src)

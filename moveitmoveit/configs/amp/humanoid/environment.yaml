@@ -4,9 +4,9 @@ num_envs: 32
 seed: 1
 
 kwargs:
-  model_path: "moveitmoveit/data/better_humanoid2/humanoid.xml"
+  model_path: "moveitmoveit/data/humanoid_rollout/humanoid.xml"
   motion_clips:
-    - "/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/better_humanoid2/humanoid_jog.npz"
+    - "/home/anthony/Dev/move-it-move-it/moveitmoveit/data/humanoid_rollout/humanoid_jog.npz"
   params:
     max_episode_time: 10.0
     sim_freq: 120.0

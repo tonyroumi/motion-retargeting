@@ -47,11 +47,11 @@ class MotionClip:
 
 
 if __name__ == "__main__":
-    files  = os.listdir("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid")
+    files  = os.listdir("/home/anthony/Dev/move-it-move-it/moveitmoveit/data/humanoid")
     for fname in files:
         if "xml" in fname:
             continue
-        file = f"/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid/{fname}"
+        file = f"/home/anthony/Dev/move-it-move-it/moveitmoveit/data/humanoid/{fname}"
         frames, fps = load_motion(file)
 
         motion = np.zeros([len(frames), 35])
@@ -61,7 +61,7 @@ if __name__ == "__main__":
             motion[i] = qpos
         
         clip = MotionClip(fname, fps=fps, frames=motion)
-        fpath = f"/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid_Better/{fname[:-4]}.npz"
+        fpath = f"/home/anthony/Dev/move-it-move-it/moveitmoveit/data/better_humanoid/{fname[:-4]}.npz"
         clip.save(fpath)
 
 

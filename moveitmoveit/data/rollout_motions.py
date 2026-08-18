@@ -56,7 +56,6 @@ Usage:
         --output data/humanoid_rollout \\
         --sim-freq 200 --decimation 4
 """
-
 from __future__ import annotations
 
 import argparse
@@ -352,7 +351,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    src_dir = Path("/home/tonyroumi/Desktop/move-it-move-it/moveitmoveit/data/humanoid")
+    src_dir = Path("/home/anthony/Dev/move-it-move-it/moveitmoveit/data/better_humanoid")
     if not src_dir.is_dir():
         print(f"Error: {src_dir} is not a directory")
         sys.exit(1)
