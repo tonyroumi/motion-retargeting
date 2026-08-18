@@ -86,7 +86,7 @@ class MujocoEnv(gym.Env):
         a = np.asarray(action, dtype=np.float64)
         low = self.action_space.low
         high = self.action_space.high
-        return self._init_pose + np.minimum(np.maximum(a, low), high)
+        return np.minimum(np.maximum(a, low), high)
 
     def render(self):
         return self.mujoco_renderer.render(self.render_mode)
