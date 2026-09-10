@@ -2,8 +2,8 @@
 # Main configuration file for motion retargeting training
 
 defaults:
-  - train: default
-  - model: default
+  - train
+  - model
   - _self_
 
 # Runtime settings
