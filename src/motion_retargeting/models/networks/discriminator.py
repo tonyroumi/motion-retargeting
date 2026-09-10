@@ -1,4 +1,4 @@
-from src.models.ops import SkeletalConv, SkeletalPooling, PoolingInfo
+from motion_retargeting.models.ops import SkeletalConv, SkeletalPooling, PoolingInfo
 
 from omegaconf import DictConfig
 from typing import Dict, List, Any

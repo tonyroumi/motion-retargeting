@@ -3,8 +3,8 @@ import math
 import numpy as np
 import torch
 
-from src.utils import ArrayLike, ArrayUtils
-from src.core.types import SkeletonTopology
+from motion_retargeting.utils import ArrayLike, ArrayUtils
+from motion_retargeting.core.types import SkeletonTopology
 
 class SkeletonUtils:
     """ Skeleton utiities """

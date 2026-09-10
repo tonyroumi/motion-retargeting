@@ -1,4 +1,3 @@
-from utils import skeleton
 from .base import BaseAdapter
 from ..metadata import SkeletonMetadata, MotionSequence
 
@@ -9,7 +8,7 @@ import numpy as np
 import os
 import torch
 
-from src.utils import ArrayUtils, RotationUtils, SkeletonUtils, ForwardKinematics, SkeletonVisualizer
+from motion_retargeting.utils import ArrayUtils, RotationUtils, SkeletonUtils, ForwardKinematics, SkeletonVisualizer
 
 class BANDAIAdapter(BaseAdapter):
     DATASET_NAME = "bandai"

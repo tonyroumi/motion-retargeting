@@ -5,7 +5,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
-from src.models.ops import SkeletalConv, SkeletalUnpool
+from motion_retargeting.models.ops import SkeletalConv, SkeletalUnpool
 
 class SkeletalDecBlock(nn.Module):
     """

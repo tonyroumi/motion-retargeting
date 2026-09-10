@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "motion-retargeting"
+version = "0.1.0"
+description = "Skeleton-aware deep motion retargeting"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy",
+    "scipy",
+    "omegaconf",
+    "hydra-core",
+    "matplotlib",
+    "opencv-python",
+    "tqdm",
+    "pyyaml",
+    "bvhio",
+    "human-body-prior",
+    "tensorboard",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

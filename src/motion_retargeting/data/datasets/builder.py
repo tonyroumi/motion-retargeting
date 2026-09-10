@@ -7,9 +7,9 @@ from typing import Any, Dict, Tuple, List
 import numpy as np
 import torch
 
-from src.data.adapters import BaseAdapter, list_characters, get_adapter_for_character
-from src.data.metadata import SkeletonMetadata, MotionSequence
-from src.utils import ArrayUtils, SkeletonUtils
+from motion_retargeting.data.adapters import BaseAdapter, list_characters, get_adapter_for_character
+from motion_retargeting.data.metadata import SkeletonMetadata, MotionSequence
+from motion_retargeting.utils import ArrayUtils, SkeletonUtils
 
 class MotionDatasetBuilder:
     def __init__(self, character: str, device: str):

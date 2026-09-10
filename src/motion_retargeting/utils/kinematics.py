@@ -1,7 +1,7 @@
-from data.metadata import SkeletonMetadata
 import torch
 
-from src.core.types import SkeletonTopology
+from motion_retargeting.core.types import SkeletonTopology
+from motion_retargeting.data.metadata import SkeletonMetadata
 
 class ForwardKinematics:
     """Forward kinematics utilities."""

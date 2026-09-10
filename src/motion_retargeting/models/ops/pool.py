@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.utils import SkeletonUtils
+from motion_retargeting.utils import SkeletonUtils
 
 @dataclass
 class PoolingInfo:

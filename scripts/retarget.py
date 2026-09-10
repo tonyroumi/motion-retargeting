@@ -9,9 +9,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.data import SkeletonMetadata, MotionSequence
-from src.models.networks import SkeletalGAN
-from src.utils import SkeletonVisualizer, ForwardKinematics, ArrayUtils
+from motion_retargeting.data import SkeletonMetadata, MotionSequence
+from motion_retargeting.models.networks import SkeletalGAN
+from motion_retargeting.utils import SkeletonVisualizer, ForwardKinematics, ArrayUtils
 
 class MotionRetargeter:  
     def __init__(self, model_path: str, window_size: int = 64):
@@ -143,12 +143,6 @@ def parse_args():
 
 
 def main():
-    import debugpy
-    print("[DEBUG] Waiting for debugger to attach on 0.0.0.0:5678 ...")
-    debugpy.listen(("0.0.0.0", 5678))
-    debugpy.wait_for_client()
-    print("[DEBUG] Debugger attached.")
-
     """Main retargeting pipeline."""
     args = parse_args()
     

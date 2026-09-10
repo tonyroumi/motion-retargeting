@@ -11,11 +11,11 @@ from typing import Dict, Any, Tuple, Literal, List, Callable
 import torch
 import torch.nn as nn
 
-from src.core.normalization import NormalizationStats
-from src.core.types import MotionOutput, PairedSample, SkeletonTopology
-from src.utils.kinematics import ForwardKinematics
-from src.utils.skeleton import SkeletonUtils
-from src.utils import ImagePool, Logger
+from motion_retargeting.core.normalization import NormalizationStats
+from motion_retargeting.core.types import MotionOutput, PairedSample, SkeletonTopology
+from motion_retargeting.utils.kinematics import ForwardKinematics
+from motion_retargeting.utils.skeleton import SkeletonUtils
+from motion_retargeting.utils import ImagePool, Logger
 
 class SkeletalDomainModule(nn.Module):
     def __init__(

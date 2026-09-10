@@ -8,9 +8,9 @@ from torch.utils.data import Dataset
 from typing import List
 import torch
 
-from src.core.normalization import NormalizationStats
-from src.core.types import PairedSample, SkeletonTopology
-from src.utils import SkeletonUtils
+from motion_retargeting.core.normalization import NormalizationStats
+from motion_retargeting.core.types import PairedSample, SkeletonTopology
+from motion_retargeting.utils import SkeletonUtils
 
 class MotionDataset(Dataset):
     """

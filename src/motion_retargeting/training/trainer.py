@@ -9,9 +9,9 @@ from torch.utils.data import DataLoader
 from typing import Any, Dict, Tuple, List
 import torch
 
-from src.core.types import MotionOutput, PairedSample
-from src.models.networks.gan import SkeletalGAN
-from src.utils import Logger, ImagePool
+from motion_retargeting.core.types import MotionOutput, PairedSample
+from motion_retargeting.models.networks.gan import SkeletalGAN
+from motion_retargeting.utils import Logger, ImagePool
 
 class SkeletalGANTrainer:
     def __init__(

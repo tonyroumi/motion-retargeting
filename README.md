@@ -1,4 +1,20 @@
-# motion-retatgeting
+# motion-retargeting
+
+## Installation
+
+```bash
+pip install -e .
+```
+
+This installs the `motion_retargeting` package (from `src/`) in editable mode.
+
+## Usage
+
+```bash
+python scripts/train.py source=<character> target=<character>
+python scripts/retarget.py --model <checkpoint> --source-skeleton <path> --target-skeleton <path> --motion <path>
+```
+
 ## Acknowledgments
 
 This project builds on ideas and methods introduced in

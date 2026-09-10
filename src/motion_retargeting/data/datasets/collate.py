@@ -1,6 +1,6 @@
 import torch
 
-from src.core.types import PairedSample
+from motion_retargeting.core.types import PairedSample
 
 def paired_collate(batch):
     rotations = tuple(

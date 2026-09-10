@@ -12,15 +12,15 @@ import argparse
 import hydra
 import torch
 
-from src.data.adapters import get_adapter_for_character
-from src.data.datasets import (
+from motion_retargeting.data.adapters import get_adapter_for_character
+from motion_retargeting.data.datasets import (
     CrossDomainMotionDataset,
     MotionDataset,
     paired_collate
 )
-from src.models.networks import SkeletalGAN
-from src.training import SkeletalGANTrainer
-from src.utils import set_seed, Logger, SkeletonVisualizer
+from motion_retargeting.models.networks import SkeletalGAN
+from motion_retargeting.training import SkeletalGANTrainer
+from motion_retargeting.utils import set_seed, Logger, SkeletonVisualizer
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig):
