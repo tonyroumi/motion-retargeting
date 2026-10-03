@@ -4,7 +4,6 @@
 This project builds on ideas and methods introduced in
 **Skeleton-Aware Networks for Deep Motion Retargeting** by Aberman et al. (2020).
 
-WIP JEPA APPROACH INCOMING.
 
 ## Citation
 
