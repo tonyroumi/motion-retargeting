@@ -1,26 +1,23 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "motion-retargeting"
+name = "motion_retargeting"
 version = "0.1.0"
-description = "Skeleton-aware deep motion retargeting"
-readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "torch",
     "numpy",
     "scipy",
-    "omegaconf",
-    "hydra-core",
-    "matplotlib",
-    "opencv-python",
     "tqdm",
-    "pyyaml",
-    "bvhio",
-    "human-body-prior",
+    "omegaconf",
+    "matplotlib",
     "tensorboard",
+    # PyPI's human_body_prior (0.8.5.0) imports `lbs` from `smplx.lbs`, whose signature
+    # has since drifted (dropped the `dtype` kwarg it expects) and is unmaintained.
+    # The 1.0.0 git tag vendors its own lbs() and isn't affected.
+    "human_body_prior @ git+https://github.com/nghorbani/human_body_prior.git@1.0.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,8 +1,7 @@
 __pycache__/
 *.pyc
 *.egg-info/
-.venv/
-venv/
 outputs/
-build/
 dist/
+data
+logs

@@ -1,0 +1,88 @@
+device: cuda
+
+dataset:
+  group_a: 
+    sources:
+      - amass
+    params:
+      sequence_length: 64
+      stride: 64
+      target_fps: 30
+      # max_samples:
+      # seed: 
+
+  group_b:
+    sources:
+      - cmu
+    params:
+      sequence_length: 64
+      stride: 64
+      target_fps: 30
+      # max_samples:
+      # seed: 
+
+method:
+  name: pan
+
+  model:
+    motion_encoder:
+      embed_dim: 64
+      attn_num_heads: 4
+      embed_hidden_dims: [256, 256]
+      conv_hidden_dim: 32
+      kernel_size: 15
+      stride: 2
+      padding: 7
+      activation: relu
+      positional_encoding_basis: 10000
+      positional_encoding_max_len: 5000
+
+    body_part_encoder:
+      embed_dim: 64
+      hidden_dims: [64, 64]
+
+    motion_decoder:
+      conv_hidden_dim: 32
+      kernel_size: 15
+      stride: 1
+      padding: 7
+      upsample_mode: linear
+      activation: relu
+
+    motion_discriminator:
+      conv_hidden_dim: 256
+      kernel_size: 15
+      stride: 2
+      padding: 7
+      activation: relu
+
+  params:
+    # Loss weights
+    reconstruction_lambda: 1
+    cycle_consistency_lambda: 2.5
+    kinematic_lambda: 100
+    adversarial_lambda: 1
+
+    # Discriminator regularization (0 disables)
+    disc_logit_reg: 0.0 #0.05
+    disc_grad_penalty: 0.0 #2.0
+    disc_weight_decay: 0.0 #0.0001
+    grad_norm_clip: 0.0 #1.0
+
+    # Log each loss term's gradient norm every N train steps (0 disables)
+    loss_grad_norm_interval: 50
+
+trainer:
+  batch_size: 128
+  learning_rate: 0.0001
+  num_epochs: 1000
+  val_fraction: 0.1
+  test_fraction: 0.0
+
+  log_interval: 10
+  validation_interval: 25
+  checkpoint_interval: 10
+
+  log_dir: logs
+  use_tensorboard: true
+  verbose: true

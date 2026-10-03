@@ -1,129 +1,108 @@
-from .base import BaseAdapter
-from ..metadata import SkeletonMetadata, MotionSequence
+# """
+# Adapter for the BANDAI-Namco motion dataset, stored as BVH files.
+# """
 
-from tqdm import tqdm
-from typing import List, Tuple
-import bvhio
-import numpy as np
-import os
-import torch
+# from .base import MotionSourceAdapter
 
-from motion_retargeting.utils import ArrayUtils, RotationUtils, SkeletonUtils, ForwardKinematics, SkeletonVisualizer
+# from tqdm import tqdm
+# from typing import List, Optional, Tuple
+# import bvhio
+# import torch
 
-class BANDAIAdapter(BaseAdapter):
-    DATASET_NAME = "bandai"
+# from motion_retargeting.data.representations.motion import Motion, Motions
+# from motion_retargeting.data.representations.skeleton import Skeleton
 
-    def __init__(self, device: torch.device):
-        super().__init__(self.DATASET_NAME, device)
+# CENTIMETERS_TO_METERS = 0.01
 
-    def _post_init(self, character: str):
-        self.character = character
-        self.character_dir = self.raw_dir / character
-        
-        cache_dir = self.cache_dir / character
-        cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self.motion_seqs = sorted([str(f) for f in self.character_dir.glob("*.bvh")])
+# class BANDAIAdapter(MotionSourceAdapter):
+#     UP_AXIS = "y"
 
-        self.data = bvhio.readAsBvh(self.motion_seqs[0])
+#     def __init__(self, cache: bool = True, device: str = "cpu"):
+#         super().__init__("bandai", device=device, file_extension="bvh")
 
-        self.joint_names = []
-        self.parents = []
+#         self._skeleton, motions = self.extract(cache=cache)
+#         self._motions = [Motions(motions, self._skeleton)]
+#         self.to_z_up()
 
-        self.build_kintree(self.data.Root, parent_idx=-1)
+#     def extract(self, cache: bool) -> Tuple[Skeleton, List[Motion]]:
+#         if cache:
+#             cached = self.load_cache()
+#             if cached is not None:
+#                 return cached
 
-        self.kintree = np.array(self.parents, dtype=np.int32)
-        self.num_joints = len(self.kintree)
+#         skeleton: Optional[Skeleton] = None
+#         motions: List[Motion] = []
 
-    def extract_skeleton(self, character: str) -> SkeletonMetadata:
-        self._post_init(character)
+#         for bvh_file in tqdm(self.files, desc="Extracting Bandai Data"):
+#             data = bvhio.readAsBvh(bvh_file)
 
-        offsets = ArrayUtils.to_numpy([
-            joint.Offset
-            for (joint, _, _) in self.data.Root.layout()
-        ])
-        offsets[0] = np.zeros(3) 
-        offsets *= 100 # convert to cm
+#             # Every BANDAI clip shares one skeleton: build it from the first file.
+#             if skeleton is None:
+#                 skeleton = self.assign_joint_bodies(bvh_skeleton(data.Root, self.device))
 
-        edge_topology = SkeletonUtils.construct_edge_topology(self.kintree)
-        ee_ids = SkeletonUtils.find_ee(self.kintree)
+#             joints = [joint for joint, _, _ in data.Root.layout()]
 
-        height = SkeletonUtils.compute_height(self.kintree, offsets, ee_ids)
+#             num_frames = data.FrameCount
 
-        skeleton = SkeletonMetadata(
-            edge_topology=ArrayUtils.to_numpy(edge_topology),
-            offsets=ArrayUtils.to_numpy(offsets),
-            ee_ids=ArrayUtils.to_numpy(ee_ids),
-            height=height,
-            kintree=ArrayUtils.to_numpy(self.kintree),
-        )
+#             # BVH positions are in centimeters; convert to meters.
+#             root_positions = torch.as_tensor(
+#                 [list(pose.Position) for pose in joints[0].Keyframes],
+#                 dtype=torch.float32,
+#                 device=self.device,
+#             ) * CENTIMETERS_TO_METERS
 
-        skeleton.save(self.skeleton_dir / f"{character}.npz")
-        return skeleton
+#             # bvhio quaternions iterate as (w, x, y, z), matching the convention
+#             # used by `motion_retargeting.kinematics`.
+#             local_rotations = torch.as_tensor(
+#                 [
+#                     [list(joint.Keyframes[t].Rotation) for joint in joints]
+#                     for t in range(num_frames)
+#                 ],
+#                 dtype=torch.float32,
+#                 device=self.device,
+#             )
 
-    def extract_motion(self, character: str) -> List[MotionSequence]:
-        self._post_init(character)
+#             motion = Motion(
+#                 root_positions=root_positions,
+#                 # BVH root joint (joint_Root) rotation, matching root_positions.
+#                 root_rotations=local_rotations[:, 0].clone(),
+#                 local_rotations=local_rotations,
+#                 fps=1.0 / data.FrameTime,
+#                 metadata={"name": bvh_file.name},
+#             )
 
-        skeleton = SkeletonMetadata.load(self.data_dir / "skeletons" / (str(character) + ".npz"))
+#             motions.append(motion)
 
-        sequences: List[MotionSequence] = []
+#         if cache:
+#             self.save_cache(skeleton, motions)
 
-        for bvh_file in tqdm(self.motion_seqs, desc="Extracting motion sequences"):
-            fname = os.path.basename(bvh_file)
+#         return skeleton, motions
 
-            data = bvhio.readAsBvh(bvh_file)
 
-            T = data.FrameCount
-            frame_time = self.data.FrameTime
-            fps = int(round(1.0 / frame_time))
+# def bvh_skeleton(root, device: str) -> Skeleton:
+#     """ Skeleton (offsets in meters) from a bvhio root joint's hierarchy. """
+#     joint_names: List[str] = []
+#     parents: List[int] = []
+#     raw_offsets: List[list] = []
 
-            positions = torch.zeros((T, self.num_joints, 3))
-            rotations = torch.zeros((T, self.num_joints, 4)) 
+#     def visit(joint, parent_idx: int) -> None:
+#         joint_names.append(joint.Name)
+#         parents.append(parent_idx)
+#         raw_offsets.append(list(joint.Offset))
 
-            for t in range(T):
-                positions[t] = ArrayUtils.to_torch([joint.Keyframes[t].Position for (joint, _, _) in data.Root.layout()])
-                rotations[t] = ArrayUtils.to_torch([joint.Keyframes[t].Rotation for (joint, _, _) in data.Root.layout()])
-            
-            rotations = RotationUtils.wxyz_to_xyzw(rotations, return_torch=True)
-            rotations = rotations[:, 1:] 
-        
-            fk_positions = ForwardKinematics.forward(
-                quaternions=rotations,
-                offsets=skeleton.offsets,
-                root_pos=positions[:,0],
-                topology=skeleton
-            )
+#         my_idx = len(joint_names) - 1
+#         for child in joint.Children:
+#             visit(child, my_idx)
 
-            motion = MotionSequence(
-                name=fname,
-                positions=ArrayUtils.to_numpy(fk_positions), 
-                rotations=ArrayUtils.to_numpy(rotations),
-                fps=fps
-            )
+#     visit(root, -1)
 
-            out = self.cache_dir / character / f"{fname.split('.')[0]}.npz"
-            motion.save(out)
-            sequences.append(motion)
+#     # BVH offsets are in centimeters; convert to meters.
+#     offsets = torch.as_tensor(raw_offsets, dtype=torch.float32, device=device) * CENTIMETERS_TO_METERS
+#     offsets[0] = torch.zeros(3, device=device)  # root has no parent offset
 
-        return sequences
-
-    def build_kintree(self, node, parent_idx: int):
-        my_idx = len(self.joint_names)
-
-        self.joint_names.append(node.Name)
-        self.parents.append(parent_idx)
-
-        for child in node.Children:
-            self.build_kintree(child, my_idx)
-
-    def _extract_offsets(self) -> np.ndarray:
-        offsets = []
-        def traverse(node):
-            offsets.append(node.Offset)
-
-            for child in node.Children:
-                traverse(child)
-        
-        traverse(self.data.Root)
-
-        return np.stack(offsets, axis=0)
+#     return Skeleton(
+#         joint_names=joint_names,
+#         parents=torch.as_tensor(parents, dtype=torch.long, device=device),
+#         offsets=offsets,
+#     )

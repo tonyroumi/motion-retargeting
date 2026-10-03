@@ -1,166 +1,129 @@
-"""
-Adapter for AMASS dataset using the SMPL BodyModel.
-    
-Extracts skeleton topology, offsets, motion sequences, and other metadata.
-"""
+from typing import List
 
-from .base import BaseAdapter
-from ..metadata import SkeletonMetadata, MotionSequence
-
-from tqdm import tqdm
-from typing import List, Tuple
 import numpy as np
 import torch
 
-from motion_retargeting.utils import ArrayUtils, RotationUtils, SkeletonUtils, ForwardKinematics
+from motion_retargeting.data.representations.motion import MotionData
 
-class AMASSAdapter(BaseAdapter):
-    DATASET_NAME = "amass"
-    SUPPORT_NAME = "body_models"
-    JOINT_CUTOFF = 22 # Joints > 21 are hands, fingers, toes. (zero based)
-    HEAD_IDX = 15
-    FOOT_IDX = 10
+from motion_retargeting.config.paths import PATHS
+from motion_retargeting.data.adapters.base import MotionSourceAdapter
+from motion_retargeting.kinematics.quaternions import quat_mul
 
-    def __init__(self, device: torch.device = 'cpu'): super().__init__(self.DATASET_NAME, device)
+class AMASSAdapter(MotionSourceAdapter):
+    NUM_JOINTS = 22  # Number of body joints (excluding fingers)
 
-    def _post_init(self, character: str):
-        """ Initialize character specific BodyModel """
-        from human_body_prior.body_model.body_model import BodyModel
+    def __init__(
+        self,
+        model_type: str = "smplh",
+        num_betas: int = 16,
+        device: str = "cpu"
+    ):
+        super().__init__("amass", device=device)
 
-        character_dir = self.raw_dir / character
-        character_skeleton = np.load(character_dir / "shape.npz")
-        character_gender = character_skeleton["gender"]
-        character_betas = character_skeleton["betas"]
+        self.model_type = model_type
+        self.num_betas = num_betas
 
-        cache_dir = self.cache_dir / character
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self.motion_seqs = [str(f) for f in character_dir.glob("*.npz") if f.name != "shape.npz"]
-
-        num_betas = len(character_betas)
-        self.betas = ArrayUtils.to_torch(character_betas, self.device)
-
-        bm_path = str(self.dataset_dir / self.SUPPORT_NAME / character_gender / "model.npz")
-        self.body_model = BodyModel(bm_path, num_betas=num_betas).to(self.device)  
-
-        self.full_kintree = self.body_model.kintree_table.cpu()
-        self.parent_kintree = self.full_kintree[0]
-        self.pruned_kintree = self._prune_kintree()
-
-        self.num_joints = len(self.parent_kintree)
-
-    def extract_skeleton(self, character: str) -> SkeletonMetadata:
-        """ Extract and save skeleton metadata from a particular character. """
-
-        self._post_init(character)
+        self._bms = {}
         
-        body = self.body_model(betas=self.betas.unsqueeze(0)) # BodyModel expects shape [1, num_betas]
-        
-        J0 = body.Jtr[0] # T pose
-        offsets = J0 - J0[self.parent_kintree]
+    def _extract(self) -> List[MotionData]:
+        files = sorted(p for p in self.raw_dir.rglob(f"*.npz") 
+                       if p.name != "shape.npz")
 
-        offsets = SkeletonUtils.prune_joints(offsets, self.JOINT_CUTOFF).cpu()
-        offsets[0] = torch.zeros(3) # No root offset
-        offsets *= 100 # convert to cm
+        from tqdm import tqdm
 
-        edge_topology = SkeletonUtils.construct_edge_topology(self.pruned_kintree[0])
-        ee_ids = SkeletonUtils.find_ee(self.pruned_kintree[0])
-        height = SkeletonUtils.compute_height(self.pruned_kintree[0], offsets, ee_ids)
+        motions: List[MotionData] = []
 
-        skeleton = SkeletonMetadata(edge_topology=ArrayUtils.to_numpy(edge_topology),
-                                    offsets=ArrayUtils.to_numpy(offsets),
-                                    ee_ids=ArrayUtils.to_numpy(ee_ids),
-                                    height=ArrayUtils.to_numpy(height),
-                                    kintree=ArrayUtils.to_numpy(self.pruned_kintree))
-        skeleton.save(self.skeleton_dir / (str(character) + ".npz") )
-
-        return skeleton
-
-    def extract_motion(self, character: str) -> List[MotionSequence]:
-        """ Extract and save all skeleton motion data for a particular character. """
-        self._post_init(character)
-
-        skeleton = SkeletonMetadata.load(self.data_dir / "skeletons" / (str(character) + ".npz"))
-
-        sequences : List[MotionSequence] = []
-
-        for npz_file in tqdm(self.motion_seqs, desc="Extracting motion sequences"):
-            fname = npz_file.split('/')[-1]
-            tqdm.write(f"Processing: {fname}")
-
+        for npz_file in tqdm(files, desc="Extracting AMASS Data"):
             data = np.load(npz_file)
-
-            pose_body = ArrayUtils.to_torch(data["poses"], self.device)
-            trans = ArrayUtils.to_torch(data["trans"], self.device)
             
-            out = self.body_model(
-                root_orient=pose_body[:,0:3],
-                pose_body=pose_body[:,3:66],
-                trans=trans,
-                betas=self.betas.unsqueeze(0)
+            bm = self._body_model(np.asarray(data["gender"]).item())
+
+            fps = float(data.get("mocap_framerate", 30.0))
+            poses = torch.as_tensor(data["poses"], dtype=torch.float32, device=self.device)
+            trans = torch.as_tensor(data["trans"], dtype=torch.float32, device=self.device)
+            betas = torch.as_tensor(data["betas"], dtype=torch.float32, device=self.device)
+
+            num_frames = poses.shape[0]
+
+            parents = bm.kintree_table[0].long()[:self.NUM_JOINTS] # Clip fingers
+
+            J0 = bm(betas=betas.unsqueeze(0)).Jtr[0, :self.NUM_JOINTS]
+            offsets = torch.zeros_like(J0)
+            offsets[1:] = J0[1:] - J0[parents[1:]]  # Parent-relative offsets (root offset zero)
+
+            rots = poses.reshape(num_frames, -1, 3)
+
+            quat_rotations = axis_angle_to_quaternion(rots)
+
+            root_positions = J0[0] + trans
+            root_rotation = quat_rotations[:, 0]
+
+            # Z-up -> canonical Y-up
+            root_positions_yup = zup_to_yup_vector(root_positions)
+            root_rotation_yup = zup_to_yup_quaternion(root_rotation)
+            joint_rotations = quat_rotations[:, :self.NUM_JOINTS] # Remove the root and clip fingers
+            joint_rotations[:, 0] = root_rotation_yup
+
+            motion = self._construct_motion(
+                parents=parents,
+                offsets=offsets,
+                joint_rotations=joint_rotations,
+                root_position=root_positions_yup,
+                fps=fps,
             )
 
-            aa = out.full_pose.reshape(-1, self.num_joints, 3)
-            quat_rotations = RotationUtils.aa_to_quat(aa.reshape(-1, 3))
-            quat_rotations = quat_rotations.reshape(-1, self.num_joints, 4)
-            quat_rotations = SkeletonUtils.prune_joints(quat_rotations, cutoff=self.JOINT_CUTOFF, discard_root=True)
+            motions.append(motion)
 
-            fk_positions = ForwardKinematics.forward(
-                quaternions=ArrayUtils.to_torch(quat_rotations),
-                offsets=skeleton.offsets,
-                root_pos=out.Jtr[:,0],
-                topology=skeleton
-            )
-            
-            motion_sequence = MotionSequence(name=fname,
-                                             positions=ArrayUtils.to_numpy(fk_positions),
-                                             rotations=ArrayUtils.to_numpy(quat_rotations),
-                                             fps=ArrayUtils.to_numpy(data['mocap_framerate']),)
-            motion_sequence.save(self.cache_dir / character / fname)
+        return motions
 
-            sequences.append(motion_sequence)
+    def _body_model(self, gender: str):
+        if gender not in self._bms:
+            from human_body_prior.body_model.body_model import BodyModel
+            bm_path = str(PATHS.body_models / self.model_type / gender / "model.npz")
+            self._bms[gender] = BodyModel(
+                bm_path,
+                model_type=self.model_type,
+                num_betas=self.num_betas
+            ).to(self.device)
+        return self._bms[gender]
 
-        return sequences
-    
-    def _prune_kintree(self):
-        """ Removes joints from the kintree outside of the joint_cutoff """
-        parent = self.full_kintree[0]
-        children = self.full_kintree[1]
 
-        pruned_parent = [
-            p if p <= self.JOINT_CUTOFF and joint <= self.JOINT_CUTOFF else -1
-            for joint, p in enumerate(parent)
-        ]
-        pruned_children = [
-            c if c <= self.JOINT_CUTOFF and joint <= self.JOINT_CUTOFF else -1
-            for joint, c in enumerate(children)
-        ]
+def axis_angle_to_quaternion(axis_angle: torch.Tensor) -> torch.Tensor:
+    """
+    Convert axis-angle rotations [..., 3] to quaternions [..., 4] in (w, x, y, z) convention.
+    """
+    angle = torch.linalg.vector_norm(axis_angle, dim=-1, keepdim=True)
+    half_angle = angle * 0.5
 
-        # Remove (-1,-1) pairs
-        out_parent = []
-        out_child  = []
-        for j, (p, c) in enumerate(zip(pruned_parent, pruned_children)):
-            if (j == 0 or (p != -1 and c != -1)) and j < 22:
-                out_parent.append(p)
-                out_child.append(c)
-        kintree = np.vstack([out_parent, out_child])
+    # sinc(x) = sin(pi*x)/(pi*x), so sin(half_angle)/angle = 0.5 * sinc(half_angle/pi).
+    # Using sinc keeps the axis*angle -> 0 limit well-defined without an epsilon guard.
+    axis_scale = 0.5 * torch.sinc(half_angle / torch.pi)
 
-        return kintree
+    w = torch.cos(half_angle)
+    xyz = axis_angle * axis_scale
+    return torch.cat([w, xyz], dim=-1)
 
-    def _compute_height(self, offset: np.ndarray):
-        """ Computes the height by summing the size of each offset vector from the head to the feet. """
-        # foot to pelvis
-        h1 = 0.0
-        p = self.FOOT_IDX
-        while p != 0:
-            h1 += np.linalg.norm(offset[p])
-            p = self.parent_kintree[p]
 
-        # pelvis to head
-        h2 = 0.0
-        p = self.HEAD_IDX
-        while p != 0:
-            h2 += np.linalg.norm(offset[p])
-            p = self.parent_kintree[p]
+def zup_to_yup_quaternion(q: torch.Tensor) -> torch.Tensor:
+    """
+    Rotate a quaternion for -90 degrees around the x-axis
+    """
+    import math
+    q_convert = torch.tensor([
+        math.cos(-math.pi / 4),  # w
+        math.sin(-math.pi / 4),  # x
+        0.0,
+        0.0,
+    ])
+    return quat_mul(q_convert, q)
 
-        return h1 + h2
+
+def zup_to_yup_vector(x: torch.Tensor) -> torch.Tensor:
+    """
+    x: [..., 3]
+    """
+    return torch.stack([
+        x[..., 0],
+        x[..., 2],
+        -x[..., 1],
+    ], dim=-1)
