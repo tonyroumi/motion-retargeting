@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, List
 import torch
 
 from motion_retargeting.data.dataset import MotionDataset, FeatureStats
-from motion_retargeting.modules.decoders import MotionDecoderConfig
+from motion_retargeting.modules.decoders import MotionDecoderConfig, ReferenceMotionDecoderConfig
 from motion_retargeting.modules.discriminators import MotionDiscriminatorConfig
 from motion_retargeting.modules.encoders import (
     BodyPartEncoderConfig,
@@ -144,10 +144,12 @@ class PANReferenceDomainSpec:
 @dataclass
 class PANReferenceModelConfig:
     motion_encoder: ReferenceMotionEncoderConfig = field(default_factory=ReferenceMotionEncoderConfig)
+    motion_decoder: ReferenceMotionDecoderConfig = field(default_factory=ReferenceMotionDecoderConfig)
 
     @classmethod
     def from_dict(cls, cfg: Dict[str, Any]) -> PANReferenceModelConfig:
         """ Build from the `method.model` section of the YAML config. """
         return cls(
             motion_encoder=ReferenceMotionEncoderConfig(**cfg.get("motion_encoder", {})),
+            motion_decoder=ReferenceMotionDecoderConfig(**cfg.get("motion_decoder", {})),
         )

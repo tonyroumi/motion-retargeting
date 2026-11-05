@@ -6,7 +6,7 @@ from typing import Dict, Iterator
 from torch import nn
 import torch
 
-from motion_retargeting.modules.decoders import MotionDecoder
+from motion_retargeting.modules.decoders import MotionDecoder, ReferenceMotionDecoder
 from motion_retargeting.modules.discriminators import MotionDiscriminator
 from motion_retargeting.modules.encoders import (
     BodyPartEncoder,
@@ -17,7 +17,14 @@ from motion_retargeting.modules.encoders import (
 from motion_retargeting.data.utils import build_joint_mask
 
 from .config import DomainSpec, PANModelConfig, PANReferenceDomainSpec, PANReferenceModelConfig
-from .masks import attention_mask, parts_to_parts, skeleton_offset_mask, temporal_conv_mask, tokens_to_parts
+from .masks import (
+    attention_mask,
+    parts_to_parts,
+    parts_to_tokens,
+    skeleton_offset_mask,
+    temporal_conv_mask,
+    tokens_to_parts,
+)
 from .utils import GeneratorOutputs
 
 
@@ -151,4 +158,9 @@ class PANReferenceDomain(nn.Module):
             num_parts=spec.num_parts,
             input_connectivity=tokens_to_parts(skeleton_offset_mask(chains, spec.num_joints), 3, part_dim),
             part_connectivity=part_connectivity,
+        )
+        self.decoder = ReferenceMotionDecoder(
+            part_connectivity=part_connectivity,
+            output_connectivity=parts_to_tokens(conv_mask, part_dim, 4),
+            **asdict(cfg.motion_decoder),
         )

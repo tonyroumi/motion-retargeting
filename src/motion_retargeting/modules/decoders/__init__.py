@@ -1,2 +1,2 @@
-from .motion_decoder import MotionDecoder, MotionDecoderConfig
+from .motion_decoder import MotionDecoder, MotionDecoderConfig, ReferenceMotionDecoder, ReferenceMotionDecoderConfig
 from .skeletal_decoder import SkeletalDecoder, SkeletalDecoderBlockConfig, SkeletalDecoderConfig

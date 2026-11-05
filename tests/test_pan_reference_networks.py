@@ -15,10 +15,12 @@ from motion_retargeting.methods.pan.masks import (
     attention_mask,
     humanoid_chains,
     parts_to_parts,
+    parts_to_tokens,
     skeleton_offset_mask,
     temporal_conv_mask,
     tokens_to_parts,
 )
+from motion_retargeting.modules.decoders import ReferenceMotionDecoder
 from motion_retargeting.modules.encoders import ReferenceBodyPartEncoder, ReferenceMotionEncoder, ReferenceMotionEncoderConfig
 from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, load_reference, local_parents, on_cpu, reference_edges, requires_reference
 
@@ -50,6 +52,14 @@ def make_skeleton_encoder(topology=FIXTURE_23) -> ReferenceBodyPartEncoder:
     )
 
 
+def make_decoder(topology=FIXTURE_23) -> ReferenceMotionDecoder:
+    conv = temporal_conv_mask(humanoid_chains(local_parents(topology)), len(topology))
+    return ReferenceMotionDecoder(
+        part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
+        output_connectivity=parts_to_tokens(conv, PART_DIM, 4),
+    )
+
+
 def copy_weights(reference_module, module, names: dict) -> None:
     source = reference_module.state_dict()
     result = module.load_state_dict({local: source[remote] for local, remote in names.items()}, strict=False)
@@ -57,6 +67,12 @@ def copy_weights(reference_module, module, names: dict) -> None:
     assert all(key.endswith("mask") for key in result.missing_keys)
 
 
+DECODER_LAYERS = {
+    "conv1.weight": "layers.0.1.weight",
+    "conv1.bias": "layers.0.1.bias",
+    "conv2.weight": "layers.1.1.weight",
+    "conv2.bias": "layers.1.1.bias",
+}
 SKELETON_LAYERS = {f"linear{i}.{kind}": f"linear{i}.{kind}" for i in (1, 2, 3) for kind in ("weight", "bias")}
 
 
@@ -257,3 +273,76 @@ class TestSkeletonEncoderAgainstReference:
         assert torch.allclose(local_input.grad, remote_input.grad, atol=ATOL, rtol=RTOL)
         remote_grads = {name: parameter.grad for name, parameter in reference_encoder.named_parameters() if parameter.grad is not None}
         assert_gradients_match(encoder, remote_grads, SKELETON_LAYERS)
+
+
+class TestDecoder:
+    def test_shape_and_upsampling(self):
+        decoder = make_decoder()
+        assert decoder(torch.randn(2, 16, NUM_PARTS, PART_DIM)).shape == (2, 64, 4 * 22 + 3)
+        assert decoder.ups.mode == "linear" and decoder.ups.align_corners is False
+
+    def test_no_total_width_bottleneck(self):
+        decoder = make_decoder()
+        assert decoder.conv1.out_channels == NUM_PARTS * PART_DIM
+
+    def test_activation_only_after_the_first_conv(self):
+        decoder = make_decoder()
+        calls = []
+        decoder.activation.register_forward_hook(lambda module, inputs, output: calls.append(1))
+        output = decoder(torch.randn(1, 16, NUM_PARTS, PART_DIM))
+        assert len(calls) == 1
+        # A final unit quaternion normalization or activation would bound or rescale the output.
+        assert not torch.allclose(output[..., :4].norm(dim=-1), torch.ones(1, 64))
+
+    def test_forbidden_part_to_output_gradients_are_exactly_zero(self):
+        decoder = make_decoder().eval()
+        conv = temporal_conv_mask(humanoid_chains(local_parents(FIXTURE_23)), 23)
+        code = torch.randn(1, 16, NUM_PARTS, PART_DIM).requires_grad_(True)
+        output = decoder(code)
+
+        for edge in range(22):
+            grad = torch.autograd.grad(output[:, :, edge * 4:edge * 4 + 4].sum(), code, retain_graph=True)[0]
+            read = grad.abs().sum(dim=(0, 1, 3)) > 0
+            expected = conv[:, edge] if conv[:, edge].any() else torch.ones(NUM_PARTS, dtype=torch.bool)
+            assert torch.equal(read, expected), edge
+
+    def test_multiply_owned_and_unassigned_and_root_outputs(self):
+        decoder = make_decoder().eval()
+        code = torch.randn(1, 16, NUM_PARTS, PART_DIM).requires_grad_(True)
+        output = decoder(code)
+
+        def read_by(channels):
+            grad = torch.autograd.grad(output[:, :, channels].sum(), code, retain_graph=True)[0]
+            return (grad.abs().sum(dim=(0, 1, 3)) > 0).nonzero().flatten().tolist()
+
+        assert read_by(slice(10 * 4, 11 * 4)) == [2, 3, 4, 5]  # Shared branch edge.
+        assert read_by(slice(21 * 4, 22 * 4)) == list(range(NUM_PARTS))  # Unowned after double conversion.
+        assert read_by(slice(-3, None)) == list(range(NUM_PARTS))  # Root channels.
+
+
+@requires_reference
+class TestDecoderAgainstReference:
+    @FIXTURES
+    def test_output_and_gradients_match(self, topology):
+        reference = load_reference()
+        with on_cpu():
+            reference_encoder = reference.MotionEncoder(ARGS, reference_edges(reference, topology), None)
+        reference_decoder = reference.MotionDecoder(ARGS, reference_encoder).eval()
+        decoder = make_decoder(topology).eval()
+        copy_weights(reference_decoder, decoder, DECODER_LAYERS)
+        assert torch.equal(decoder.conv2.mask, reference_decoder.layers[1][1].mask[..., :1])
+
+        code = torch.randn(2, 16, NUM_PARTS, PART_DIM)
+        local_code = code.clone().requires_grad_(True)
+        remote_code = code.flatten(2, 3).transpose(1, 2).clone().requires_grad_(True)
+
+        local, remote = decoder(local_code), reference_decoder(remote_code)
+        assert torch.allclose(local, remote.transpose(1, 2), atol=ATOL, rtol=RTOL)
+
+        target = torch.randn_like(local)
+        (local * target).sum().backward()
+        (remote.transpose(1, 2) * target).sum().backward()
+
+        assert torch.allclose(local_code.grad.flatten(2, 3).transpose(1, 2), remote_code.grad, atol=ATOL, rtol=RTOL)
+        remote_grads = {name: parameter.grad for name, parameter in reference_decoder.named_parameters() if parameter.grad is not None}
+        assert_gradients_match(decoder, remote_grads, DECODER_LAYERS)

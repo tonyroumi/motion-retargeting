@@ -43,5 +43,9 @@ method:
       positional_encoding_basis: 10000
       positional_encoding_max_len: 5000
 
+    motion_decoder:
+      kernel_size: 15
+      upsample_mode: linear
+
   params:
     recipe: mixamo_reference
