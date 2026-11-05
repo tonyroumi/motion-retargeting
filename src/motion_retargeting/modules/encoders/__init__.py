@@ -1,4 +1,4 @@
-from .body_part_encoder import BodyPartEncoder, BodyPartEncoderConfig
+from .body_part_encoder import BodyPartEncoder, BodyPartEncoderConfig, ReferenceBodyPartEncoder
 from .motion_encoder import (
     MaskedConv1d,
     MotionEncoder,

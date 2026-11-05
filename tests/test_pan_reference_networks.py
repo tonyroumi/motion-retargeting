@@ -15,10 +15,11 @@ from motion_retargeting.methods.pan.masks import (
     attention_mask,
     humanoid_chains,
     parts_to_parts,
+    skeleton_offset_mask,
     temporal_conv_mask,
     tokens_to_parts,
 )
-from motion_retargeting.modules.encoders import ReferenceMotionEncoder, ReferenceMotionEncoderConfig
+from motion_retargeting.modules.encoders import ReferenceBodyPartEncoder, ReferenceMotionEncoder, ReferenceMotionEncoderConfig
 from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, load_reference, local_parents, on_cpu, reference_edges, requires_reference
 
 NUM_PARTS = 6
@@ -38,6 +39,25 @@ def make_encoder(topology=FIXTURE_23) -> ReferenceMotionEncoder:
         part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
         **asdict(ReferenceMotionEncoderConfig()),
     )
+
+
+def make_skeleton_encoder(topology=FIXTURE_23) -> ReferenceBodyPartEncoder:
+    chains = humanoid_chains(local_parents(topology))
+    return ReferenceBodyPartEncoder(
+        num_parts=NUM_PARTS,
+        input_connectivity=tokens_to_parts(skeleton_offset_mask(chains, len(topology)), 3, PART_DIM),
+        part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
+    )
+
+
+def copy_weights(reference_module, module, names: dict) -> None:
+    source = reference_module.state_dict()
+    result = module.load_state_dict({local: source[remote] for local, remote in names.items()}, strict=False)
+    assert not result.unexpected_keys
+    assert all(key.endswith("mask") for key in result.missing_keys)
+
+
+SKELETON_LAYERS = {f"linear{i}.{kind}": f"linear{i}.{kind}" for i in (1, 2, 3) for kind in ("weight", "bias")}
 
 
 def motion_input(topology=FIXTURE_23, batch: int = 2, frames: int = 64) -> torch.Tensor:
@@ -184,3 +204,56 @@ class TestEncoderAgainstReference:
         assert torch.equal(encoder.attention_mask, reference_encoder.attention_mask)
         assert torch.equal(encoder.conv_shortcut.mask, reference_encoder.conv_residual.mask[..., :1])
         assert torch.equal(encoder.conv2.mask, reference_encoder.conv2.mask[..., :1])
+
+
+class TestSkeletonEncoder:
+    def test_shape_and_final_activation(self):
+        encoder = make_skeleton_encoder()
+        code = encoder(torch.randn(3, 23, 3))
+        assert code.shape == (3, NUM_PARTS, PART_DIM)
+
+        # LeakyReLU follows all three layers, the last one included.
+        activations = []
+        encoder.activation.register_forward_hook(lambda module, inputs, output: activations.append(output))
+        encoder(torch.randn(3, 23, 3))
+        assert len(activations) == 3
+
+    def test_offset_influence_follows_the_mask_with_the_last_offset_always_on(self):
+        encoder = make_skeleton_encoder()
+        offsets = torch.randn(1, 23, 3).requires_grad_(True)
+        code = encoder(offsets)
+
+        mask = skeleton_offset_mask(humanoid_chains(local_parents(FIXTURE_23)), 23)
+        for part in range(NUM_PARTS):
+            grad = torch.autograd.grad(code[:, part].sum(), offsets, retain_graph=True)[0]
+            read = grad[0].abs().sum(dim=-1) > 0
+            assert torch.equal(read, mask[part]), part
+            assert read[22]
+
+
+@requires_reference
+class TestSkeletonEncoderAgainstReference:
+    @FIXTURES
+    def test_output_and_gradients_match(self, topology):
+        reference = load_reference()
+        reference_encoder = reference.SkeletonEncoder(ARGS, reference_edges(reference, topology), None)
+        encoder = make_skeleton_encoder(topology)
+        copy_weights(reference_encoder, encoder, SKELETON_LAYERS)
+        assert torch.equal(encoder.linear1.mask, reference_encoder.linear1.mask)
+        assert torch.equal(encoder.linear3.mask, reference_encoder.linear3.mask)
+
+        offsets = torch.randn(2, len(topology), 3)
+        local_input = offsets.clone().requires_grad_(True)
+        remote_input = offsets.clone().requires_grad_(True)
+
+        local, remote = encoder(local_input), reference_encoder(remote_input)
+        assert remote.shape == (2, NUM_PARTS * PART_DIM, 1)
+        assert torch.allclose(local.flatten(1), remote[..., 0], atol=ATOL, rtol=RTOL)
+
+        target = torch.randn_like(local)
+        (local * target).sum().backward()
+        (remote[..., 0] * target.flatten(1)).sum().backward()
+
+        assert torch.allclose(local_input.grad, remote_input.grad, atol=ATOL, rtol=RTOL)
+        remote_grads = {name: parameter.grad for name, parameter in reference_encoder.named_parameters() if parameter.grad is not None}
+        assert_gradients_match(encoder, remote_grads, SKELETON_LAYERS)

@@ -8,11 +8,16 @@ import torch
 
 from motion_retargeting.modules.decoders import MotionDecoder
 from motion_retargeting.modules.discriminators import MotionDiscriminator
-from motion_retargeting.modules.encoders import BodyPartEncoder, MotionEncoder, ReferenceMotionEncoder
+from motion_retargeting.modules.encoders import (
+    BodyPartEncoder,
+    MotionEncoder,
+    ReferenceBodyPartEncoder,
+    ReferenceMotionEncoder,
+)
 from motion_retargeting.data.utils import build_joint_mask
 
 from .config import DomainSpec, PANModelConfig, PANReferenceDomainSpec, PANReferenceModelConfig
-from .masks import attention_mask, parts_to_parts, temporal_conv_mask, tokens_to_parts
+from .masks import attention_mask, parts_to_parts, skeleton_offset_mask, temporal_conv_mask, tokens_to_parts
 from .utils import GeneratorOutputs
 
 
@@ -133,10 +138,17 @@ class PANReferenceDomain(nn.Module):
         conv_mask = temporal_conv_mask(chains, spec.num_tokens)
         part_dim = cfg.motion_encoder.embed_dim
 
+        part_connectivity = parts_to_parts(spec.num_parts, part_dim, part_dim)
+
         self.motion_encoder = ReferenceMotionEncoder(
             num_parts=spec.num_parts,
             attention_mask=attention_mask(chains, spec.num_tokens),
             shortcut_connectivity=tokens_to_parts(conv_mask, 4, part_dim),
-            part_connectivity=parts_to_parts(spec.num_parts, part_dim, part_dim),
+            part_connectivity=part_connectivity,
             **asdict(cfg.motion_encoder),
+        )
+        self.body_part_encoder = ReferenceBodyPartEncoder(
+            num_parts=spec.num_parts,
+            input_connectivity=tokens_to_parts(skeleton_offset_mask(chains, spec.num_joints), 3, part_dim),
+            part_connectivity=part_connectivity,
         )
