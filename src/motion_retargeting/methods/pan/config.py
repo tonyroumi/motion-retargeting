@@ -5,14 +5,23 @@ PAN configuration.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List
 
 import torch
 
 from motion_retargeting.data.dataset import MotionDataset, FeatureStats
 from motion_retargeting.modules.decoders import MotionDecoderConfig
 from motion_retargeting.modules.discriminators import MotionDiscriminatorConfig
-from motion_retargeting.modules.encoders import BodyPartEncoderConfig, MotionEncoderConfig
+from motion_retargeting.modules.encoders import (
+    BodyPartEncoderConfig,
+    MotionEncoderConfig,
+    ReferenceMotionEncoderConfig,
+)
+
+from .masks import humanoid_chains
+
+if TYPE_CHECKING:
+    from .data import ReferenceMotionDataset
 
 # Value of `method.params.recipe` selecting the reference-Mixamo computation.
 LEGACY_RECIPE = "legacy"
@@ -96,4 +105,49 @@ class PANModelConfig:
             body_part_encoder=BodyPartEncoderConfig(**cfg.get("body_part_encoder", {})),
             motion_decoder=MotionDecoderConfig(**cfg.get("motion_decoder", {})),
             motion_discriminator=MotionDiscriminatorConfig(**cfg.get("motion_discriminator", {})),
+        )
+
+
+@dataclass(frozen=True)
+class PANReferenceDomainSpec:
+    """ One domain of the reference recipe: its topology and skeleton banks, validated on construction. """
+    parents: torch.Tensor  # [J], root first with parent -1
+    offsets: torch.Tensor  # [K, J, 3], metres
+    mean: torch.Tensor     # [K, 4E + 3]
+    std: torch.Tensor      # [K, 4E + 3]
+
+    def __post_init__(self):
+        humanoid_chains(self.parents)
+
+    @property
+    def chains(self) -> List[List[int]]:
+        return humanoid_chains(self.parents)
+
+    @property
+    def num_parts(self) -> int:
+        return len(self.chains)
+
+    @property
+    def num_joints(self) -> int:
+        return self.parents.shape[0]
+
+    @property
+    def num_tokens(self) -> int:
+        """ Network tokens: E edges + the root-position token, which is also J. """
+        return self.num_joints
+
+    @classmethod
+    def from_dataset(cls, dataset: ReferenceMotionDataset) -> PANReferenceDomainSpec:
+        return cls(parents=dataset.parents, offsets=dataset.offsets, mean=dataset.mean, std=dataset.std)
+
+
+@dataclass
+class PANReferenceModelConfig:
+    motion_encoder: ReferenceMotionEncoderConfig = field(default_factory=ReferenceMotionEncoderConfig)
+
+    @classmethod
+    def from_dict(cls, cfg: Dict[str, Any]) -> PANReferenceModelConfig:
+        """ Build from the `method.model` section of the YAML config. """
+        return cls(
+            motion_encoder=ReferenceMotionEncoderConfig(**cfg.get("motion_encoder", {})),
         )

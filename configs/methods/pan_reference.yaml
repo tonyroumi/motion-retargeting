@@ -30,5 +30,18 @@ dataset:
 method:
   name: pan
 
+  model:
+    motion_encoder:
+      embed_dim: 32
+      embed_hidden_dim: 512
+      num_layers: 2
+      num_heads: 2
+      feedforward_dim: 256
+      dropout: 0.2
+      part_token_std: 0.1
+      kernel_size: 15
+      positional_encoding_basis: 10000
+      positional_encoding_max_len: 5000
+
   params:
     recipe: mixamo_reference

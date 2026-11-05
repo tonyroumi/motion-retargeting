@@ -8,10 +8,11 @@ import torch
 
 from motion_retargeting.modules.decoders import MotionDecoder
 from motion_retargeting.modules.discriminators import MotionDiscriminator
-from motion_retargeting.modules.encoders import BodyPartEncoder, MotionEncoder
+from motion_retargeting.modules.encoders import BodyPartEncoder, MotionEncoder, ReferenceMotionEncoder
 from motion_retargeting.data.utils import build_joint_mask
 
-from .config import DomainSpec, PANModelConfig
+from .config import DomainSpec, PANModelConfig, PANReferenceDomainSpec, PANReferenceModelConfig
+from .masks import attention_mask, parts_to_parts, temporal_conv_mask, tokens_to_parts
 from .utils import GeneratorOutputs
 
 
@@ -120,3 +121,22 @@ class PANModel(nn.Module):
     def discriminator_parameters(self) -> Iterator[nn.Parameter]:
         for domain in self.domains.values():
             yield from domain.discriminator.parameters()
+
+
+class PANReferenceDomain(nn.Module):
+    """ Reference-recipe networks of one domain, with its masks (and later banks) as persistent buffers. """
+
+    def __init__(self, cfg: PANReferenceModelConfig, spec: PANReferenceDomainSpec):
+        super().__init__()
+
+        chains = spec.chains
+        conv_mask = temporal_conv_mask(chains, spec.num_tokens)
+        part_dim = cfg.motion_encoder.embed_dim
+
+        self.motion_encoder = ReferenceMotionEncoder(
+            num_parts=spec.num_parts,
+            attention_mask=attention_mask(chains, spec.num_tokens),
+            shortcut_connectivity=tokens_to_parts(conv_mask, 4, part_dim),
+            part_connectivity=parts_to_parts(spec.num_parts, part_dim, part_dim),
+            **asdict(cfg.motion_encoder),
+        )
