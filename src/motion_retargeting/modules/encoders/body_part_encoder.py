@@ -20,7 +20,7 @@ class BodyPartEncoder(nn.Module):
     default) over the flattened per-joint features of just the joints
     belonging to that body, so bodies with different joint counts each get
     an appropriately-sized input. The per-body embeddings are stacked along
-    the body dimension to produce a [B, N, d] tensor.
+    the body dimension, in body-key order, to produce a [B, N, d] tensor.
     """
 
     def __init__(
@@ -34,7 +34,11 @@ class BodyPartEncoder(nn.Module):
         super().__init__()
 
         self.num_bodies = len(body_joints)
-        self.body_joints = list(body_joints.values())
+        # Index k of the output is body key k, the position build_joint_mask gives that body's
+        # token, whatever order the dict iterates in.
+        if sorted(body_joints) != list(range(self.num_bodies)):
+            raise ValueError(f"Body keys must be 0..{self.num_bodies - 1}, got {sorted(body_joints)}")
+        self.body_joints = [body_joints[body] for body in range(self.num_bodies)]
 
         hidden_dims = hidden_dims if hidden_dims is not None else (embed_dim, embed_dim)
 
