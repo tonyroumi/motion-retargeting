@@ -20,7 +20,13 @@ from .config import (
     PANReferenceDomainSpec,
     PANReferenceModelConfig,
 )
-from .losses import adversarial_loss, reference_discriminator_loss, reference_generator_adversarial_loss
+from .kinematics import end_effector_velocity
+from .losses import (
+    adversarial_loss,
+    reference_discriminator_loss,
+    reference_end_effector_terms,
+    reference_generator_adversarial_loss,
+)
 from .model import PANModel, PANReferenceModel, GeneratorOutputs
 from .utils import (
     GeneratorOutputs,
@@ -433,6 +439,75 @@ class PANReferenceMethod(PANMethod):
             )
 
         return ReferenceForwardState(outputs=outputs, sources=sources, pairs=pairs)
+
+    def normalized_positions(self, domain: str, bones: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
+        """ Root-relative positions with the absolute root entry, over each sample's height. """
+        modules = self.model.domains[domain]
+        return modules.fk.root_relative_with_absolute_root(bones) / modules.heights[bank_ids][:, None, None, None]
+
+    def normalized_end_effector_velocity(self, domain: str, bones: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
+        """ Scaled world end-effector displacement per frame, over each sample's height. """
+        modules = self.model.domains[domain]
+        velocity = end_effector_velocity(modules.fk.world_positions(bones), modules.ee_ids)
+        return velocity / modules.heights[bank_ids][:, None, None, None]
+
+    def compute_generator_losses(self, state: ReferenceForwardState) -> Dict[str, torch.Tensor]:
+        """
+        Weighted generator terms, each logged on its own:
+          - "<domain>/reconstruction": every normalized edge and root channel
+          - "<domain>/root":           denormalized root XYZ over the source's height
+          - "<domain>/position":       root-relative positions over the source's height
+        and on all four "<source>_to_<destination>" routes:
+          - latent_cycle:                L1 between the source's code and the fake's re-encoded code
+          - position_cycle:              root-relative positions of the cycle against the source
+          - end_effector / contact:      velocity transfer, each side over its own skeleton's height
+        plus adversarial on the two cross-domain routes.
+        """
+        cfg = self.cfg
+        losses = {}
+
+        positions = {}
+        velocities = {}
+        for name, source in state.sources.items():
+            heights = self.model.domains[name].heights[source.bank_ids][:, None, None]
+            positions[name] = self.normalized_positions(name, source.bones, source.bank_ids)
+            velocities[name] = self.normalized_end_effector_velocity(name, source.bones, source.bank_ids)
+
+            losses[f"{name}/reconstruction"] = cfg.reconstruction_lambda * F.mse_loss(source.reconstruction, source.motion)
+            losses[f"{name}/root"] = cfg.root_lambda * F.mse_loss(
+                source.reconstruction_denormalized[..., -3:] / heights,
+                source.denormalized[..., -3:] / heights,
+            )
+            losses[f"{name}/position"] = cfg.position_lambda * F.mse_loss(
+                self.normalized_positions(name, source.reconstruction_bones, source.bank_ids),
+                positions[name],
+            )
+
+        for (source, destination), pair in state.pairs.items():
+            route = f"{source}_to_{destination}"
+            bank_ids = state.sources[source].bank_ids
+
+            losses[f"{route}/latent_cycle"] = cfg.cycle_lambda * F.l1_loss(
+                state.outputs.pairs[(source, destination)].fake_code,
+                state.outputs.motion_codes[source],
+            )
+            losses[f"{route}/position_cycle"] = cfg.cycle_lambda * F.mse_loss(
+                self.normalized_positions(source, pair.cycle_bones, bank_ids),
+                positions[source],
+            )
+
+            transfer, contact = reference_end_effector_terms(
+                velocities[source],
+                self.normalized_end_effector_velocity(destination, pair.fake_bones, pair.target_ids),
+                cfg.contact_threshold,
+            )
+            losses[f"{route}/end_effector"] = cfg.end_effector_lambda * transfer
+            losses[f"{route}/contact"] = cfg.end_effector_lambda * cfg.contact_lambda * contact
+
+        adversarial = self.compute_adversarial_losses(state)
+        losses.update({name: cfg.adversarial_lambda * loss for name, loss in adversarial.items()})
+
+        return losses
 
     def compute_adversarial_losses(self, state: ReferenceForwardState) -> Dict[str, torch.Tensor]:
         """ Cross-domain routes only: each fake's positions, judged by its destination's discriminator. """

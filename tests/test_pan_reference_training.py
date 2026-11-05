@@ -13,7 +13,9 @@ import pytest
 import torch
 
 from motion_retargeting.methods.pan.config import PANReferenceConfig, PANReferenceDomainSpec, PANReferenceModelConfig
+from motion_retargeting.methods.pan.losses import reference_end_effector_terms
 from motion_retargeting.methods.pan.method import PANReferenceMethod
+from pan_reference_support import ARGS, load_reference, requires_reference
 
 # The AMASS and CMU skeletons of configs/methods/pan_reference.yaml.
 AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
@@ -35,7 +37,8 @@ def make_spec(parents, num_banks: int, generator: torch.Generator) -> PANReferen
     mean = torch.zeros(num_banks, channels)
     mean[:, ::4] = 1.0
     mean[:, -3:] = torch.randn(num_banks, 3, generator=generator)
-    std = 0.05 + 0.1 * torch.rand(num_banks, channels, generator=generator)
+    # Small enough that an untrained decoder's generated velocities include contact frames.
+    std = 0.001 + 0.002 * torch.rand(num_banks, channels, generator=generator)
 
     return PANReferenceDomainSpec(parents=torch.tensor(parents), offsets=offsets, mean=mean, std=std)
 
@@ -226,3 +229,204 @@ class TestGANRoutes:
         assert stored.shape == (BATCH_SIZE, WINDOW, 24, 3)
         assert not stored.requires_grad
         assert torch.equal(stored, state.pairs[("group_a", "group_b")].fake_bones.detach())
+
+
+def expected_generator_terms() -> set:
+    terms = {f"{d}/{term}" for d in PARENTS for term in ("reconstruction", "root", "position")}
+    for source in PARENTS:
+        for destination in PARENTS:
+            route = f"{source}_to_{destination}"
+            terms |= {f"{route}/{term}" for term in ("latent_cycle", "position_cycle", "end_effector", "contact")}
+            if source != destination:
+                terms.add(f"{route}/adversarial")
+    return terms
+
+
+class TestObjective:
+    def setup_method(self):
+        self.method = make_method()
+        self.method.eval()
+        self.batch = make_batch(self.method.domain_specs)
+        self.state = self.method.forward_state(self.batch)
+        self.losses = self.method.compute_generator_losses(self.state)
+
+    def test_term_set_has_no_feature_cycle_or_cycle_fk_multiplier(self):
+        assert set(self.losses) == expected_generator_terms()
+        assert all(torch.isfinite(loss) for loss in self.losses.values())
+
+    def test_reconstruction_is_unweighted_channel_mse(self):
+        source = self.state.sources["group_a"]
+        expected = torch.mean((source.reconstruction - source.motion) ** 2)
+        assert self.losses["group_a/reconstruction"].item() == pytest.approx(expected.item())
+
+    @pytest.mark.parametrize("field, term, factor", [
+        ("root_lambda", "group_a/root", 100),
+        ("position_lambda", "group_a/position", 100),
+        ("cycle_lambda", "group_a_to_group_b/latent_cycle", 2.5),
+        ("cycle_lambda", "group_a_to_group_b/position_cycle", 2.5),
+        ("end_effector_lambda", "group_b_to_group_a/end_effector", 50),
+        ("contact_lambda", "group_b_to_group_a/contact", 100),
+    ])
+    def test_factors(self, field, term, factor):
+        assert getattr(PANReferenceConfig(), field) == factor
+
+        self.method.cfg = PANReferenceConfig(**{field: 2 * factor})
+        changed = self.method.compute_generator_losses(self.state)
+        assert changed[term].item() == pytest.approx(2 * self.losses[term].item(), rel=1e-5)
+
+    def test_latent_cycle_is_l1_and_differentiable_on_both_sides(self):
+        pair = self.state.outputs.pairs[("group_a", "group_b")]
+        source_code = self.state.outputs.motion_codes["group_a"]
+        expected = 2.5 * (pair.fake_code - source_code).abs().mean()
+        assert self.losses["group_a_to_group_b/latent_cycle"].item() == pytest.approx(expected.item())
+
+        assert pair.fake_code.requires_grad and source_code.requires_grad
+
+    def test_no_direct_paired_retarget_rotation_target(self):
+        """ The only terms depending on a fake's rotations go through positions, latent or D. """
+        pair = self.state.outputs.pairs[("group_a", "group_b")]
+        loss = self.losses["group_a/reconstruction"]
+        assert torch.autograd.grad(loss, pair.fake, retain_graph=True, allow_unused=True)[0] is None
+
+    def test_contacts_select_on_generated_velocity(self):
+        source = torch.ones(1, 1, 2, 3)
+        fake = torch.zeros(1, 1, 2, 3)
+        fake[:, :, 0] = 0.001  # Generated contact, where the source is moving.
+        fake[:, :, 1] = 1.0  # Generated motion, not selected.
+
+        transfer, contact = reference_end_effector_terms(source, fake, 0.008)
+        assert contact.item() == pytest.approx((1 - 0.001) ** 2)
+        assert transfer.item() == pytest.approx(((1 - 0.001) ** 2 + 0.0) / 2)
+
+    def test_height_doubling_with_proportionate_geometry_leaves_geometry_terms_invariant(self):
+        specs = make_specs()
+        scaled = {}
+        for name, spec in specs.items():
+            mean, std = spec.mean.clone(), spec.std.clone()
+            mean[:, -3:] *= 2
+            std[:, -3:] *= 2
+            scaled[name] = PANReferenceDomainSpec(parents=spec.parents, offsets=2 * spec.offsets, mean=mean, std=std)
+
+        original = make_method(specs)
+        doubled = make_method(scaled)
+        original.eval()
+        doubled.eval()
+
+        batch = make_batch(specs)
+        original.model.load_state_dict(
+            {key: value for key, value in doubled.model.state_dict().items() if "encoder" in key or "decoder" in key},
+            strict=False,
+        )
+        torch.manual_seed(5)
+        original_losses = original.compute_generator_losses(original.forward_state(batch))
+        torch.manual_seed(5)
+        doubled_losses = doubled.compute_generator_losses(doubled.forward_state(batch))
+
+        for term in ("group_a/root", "group_b/position", "group_a_to_group_b/position_cycle", "group_b_to_group_a/end_effector"):
+            assert doubled_losses[term].item() == pytest.approx(original_losses[term].item(), rel=1e-3), term
+
+    def test_empty_contact_selection_raises(self):
+        self.method.cfg = PANReferenceConfig(contact_threshold=0.0)
+        with pytest.raises(RuntimeError, match="contact threshold"):
+            self.method.compute_generator_losses(self.state)
+
+
+@requires_reference
+class TestObjectiveAgainstReference:
+    def test_scalars_and_gradients_match_the_reference_ledger(self):
+        reference = load_reference()
+        method = make_method()
+        method.eval()
+        batch = make_batch(method.domain_specs)
+        state = method.forward_state(batch)
+        losses = method.compute_generator_losses(state)
+
+        topologies = {name: [0] + PARENTS[name][1:] for name in PARENTS}
+        kinematics = {
+            name: reference.ForwardKinematics(ARGS, reference.build_edge_topology(topologies[name], torch.zeros(len(topologies[name]), 3)))
+            for name in PARENTS
+        }
+        criterion_rec = torch.nn.MSELoss()
+        criterion_latent = torch.nn.L1Loss()
+        criterion_ee = reference.Criterion_EE(ARGS, torch.nn.MSELoss())
+        criterion_gan = reference.GAN_loss("lsgan")
+
+        def remote_fk(name, motion, bank_ids):
+            domain = method.model.domains[name]
+            denormalized = motion * domain.std[bank_ids][:, None] + domain.mean[bank_ids][:, None]
+            return denormalized, kinematics[name].forward_from_raw(denormalized.transpose(1, 2), domain.offsets[bank_ids])
+
+        def remote_ee(name, positions, bank_ids):
+            domain = method.model.domains[name]
+            velocity = reference.get_ee(positions, topologies[name], domain.ee_ids, velo=1, from_root=1)
+            return velocity / domain.heights[bank_ids].reshape(-1, 1, 1, 1)
+
+        def world(name, positions, bank_ids):
+            height = method.model.domains[name].heights[bank_ids].reshape(-1, 1, 1, 1)
+            return kinematics[name].from_local_to_world(positions) / height
+
+        expected = {}
+        references = {}
+        for name in PARENTS:
+            bank_ids = batch[name]["bank_id"]
+            motion = batch[name]["motion"]
+            reconstruction = state.outputs.reconstructions[name]
+            height = method.model.domains[name].heights[bank_ids].reshape(-1, 1)
+
+            denormalized, positions = remote_fk(name, motion, bank_ids)
+            positions = positions.detach()
+            reconstruction_denormalized, reconstruction_positions = remote_fk(name, reconstruction, bank_ids)
+            references[name] = (bank_ids, positions)
+
+            expected[f"{name}/reconstruction"] = criterion_rec(motion, reconstruction)
+            expected[f"{name}/root"] = 100 * criterion_rec(
+                denormalized[..., -3:] / height.unsqueeze(-1),
+                reconstruction_denormalized[..., -3:] / height.unsqueeze(-1),
+            )
+            expected[f"{name}/position"] = 100 * criterion_rec(
+                world(name, positions, bank_ids),
+                world(name, reconstruction_positions, bank_ids),
+            )
+
+        for (source, destination), pair in state.outputs.pairs.items():
+            route = f"{source}_to_{destination}"
+            bank_ids, positions = references[source]
+
+            _, cycle_positions = remote_fk(source, pair.cycle, bank_ids)
+            _, fake_positions = remote_fk(destination, pair.fake, pair.target_ids)
+
+            expected[f"{route}/latent_cycle"] = 2.5 * criterion_latent(
+                state.outputs.motion_codes[source].flatten(2, 3).transpose(1, 2),
+                pair.fake_code.flatten(2, 3).transpose(1, 2),
+            )
+            expected[f"{route}/position_cycle"] = 2.5 * criterion_rec(
+                world(source, positions, bank_ids),
+                world(source, cycle_positions, bank_ids),
+            )
+
+            ee_total = criterion_ee(
+                remote_ee(source, positions, bank_ids),
+                remote_ee(destination, fake_positions, pair.target_ids),
+            )
+            expected[f"{route}/end_effector_total"] = 50 * ee_total
+
+            if source != destination:
+                expected[f"{route}/adversarial"] = criterion_gan(
+                    method.model.domains[destination].discriminator(fake_positions), True
+                )
+
+        for term, value in expected.items():
+            if term.endswith("end_effector_total"):
+                route = term.rsplit("/", 1)[0]
+                local = losses[f"{route}/end_effector"] + losses[f"{route}/contact"]
+            else:
+                local = losses[term]
+            assert local.item() == pytest.approx(value.item(), rel=1e-3, abs=1e-5), term
+
+        parameters = [p for p in method.model.generator_parameters() if p.requires_grad]
+        local_grads = torch.autograd.grad(sum(losses.values()), parameters, retain_graph=True, allow_unused=True)
+        remote_grads = torch.autograd.grad(sum(expected.values()), parameters, retain_graph=True, allow_unused=True)
+        for local, remote in zip(local_grads, remote_grads):
+            assert (local is None) == (remote is None)
+            if local is not None:
+                assert torch.allclose(local, remote, atol=1e-3, rtol=1e-2)

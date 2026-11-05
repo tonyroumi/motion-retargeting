@@ -163,6 +163,19 @@ class PANReferenceConfig:
     replay_buffer_size: int = 50
     swap_probability: float = 0.5
 
+    # Objective: every outer domain / pair aggregation is a sum
+    reconstruction_lambda: float = 1.0
+    root_lambda: float = 100.0
+    position_lambda: float = 100.0
+    cycle_lambda: float = 2.5
+    adversarial_lambda: float = 1.0
+    end_effector_lambda: float = 50.0
+    contact_lambda: float = 100.0  # On top of end_effector_lambda
+    contact_threshold: float = 0.008  # Generated, normalized, scaled end-effector velocity norm
+
+    # Log each loss term's gradient norm every N train steps (0 disables; one extra backward per term)
+    loss_grad_norm_interval: int = 0
+
     def __post_init__(self):
         if self.recipe != REFERENCE_RECIPE:
             raise ValueError(f"PANReferenceConfig only runs recipe '{REFERENCE_RECIPE}', got '{self.recipe}'")
