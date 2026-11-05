@@ -430,3 +430,133 @@ class TestObjectiveAgainstReference:
             assert (local is None) == (remote is None)
             if local is not None:
                 assert torch.allclose(local, remote, atol=1e-3, rtol=1e-2)
+
+
+def snapshot(parameters) -> list:
+    return [parameter.detach().clone() for parameter in parameters]
+
+
+def unchanged(parameters, before) -> bool:
+    return all(torch.equal(parameter, old) for parameter, old in zip(parameters, before))
+
+
+class RecordingOptimizer:
+    """ Wraps one optimizer's step to record order, and the parameters around the step. """
+
+    def __init__(self, optimizer, name: str, log: list, on_step=None):
+        self.step, self.name, self.log = optimizer.step, name, log
+        self.on_step = on_step
+        optimizer.step = self
+
+    def __call__(self, *args, **kwargs):
+        self.log.append(self.name)
+        if self.on_step is not None:
+            self.on_step()
+        return self.step(*args, **kwargs)
+
+
+class TestUpdateOrder:
+    def setup_method(self):
+        self.method = make_method()
+        self.batch = make_batch(self.method.domain_specs)
+        self.generator = list(self.method.model.generator_parameters())
+        self.discriminator = list(self.method.model.discriminator_parameters())
+
+    def test_generator_steps_before_discriminator_with_one_forward(self):
+        log = []
+        RecordingOptimizer(self.method.generator_optimizer, "generator", log)
+        RecordingOptimizer(self.method.discriminator_optimizer, "discriminator", log)
+
+        calls = []
+        forward = self.method.model.forward_generator
+        self.method.model.forward_generator = lambda batch: (calls.append(1), forward(batch))[1]
+
+        self.method.train_step(self.batch)
+        assert log == ["generator", "discriminator"]
+        assert len(calls) == 1
+
+    def test_generator_step_changes_only_the_generator_and_leaves_no_discriminator_gradients(self):
+        discriminator_before = snapshot(self.discriminator)
+        checks = {}
+
+        def at_generator_step():
+            checks["no_discriminator_gradients"] = all(p.grad is None for p in self.discriminator)
+            checks["frozen"] = not any(p.requires_grad for p in self.discriminator)
+            checks["generator_has_gradients"] = any(p.grad is not None for p in self.generator)
+
+        RecordingOptimizer(self.method.generator_optimizer, "generator", [], on_step=at_generator_step)
+
+        def at_discriminator_step():
+            checks["discriminator_untouched_by_generator"] = unchanged(self.discriminator, discriminator_before)
+            checks["restored"] = all(p.requires_grad for p in self.discriminator)
+
+        RecordingOptimizer(self.method.discriminator_optimizer, "discriminator", [], on_step=at_discriminator_step)
+
+        generator_before = snapshot(self.generator)
+        self.method.train_step(self.batch)
+
+        assert all(checks.values()), checks
+        assert not unchanged(self.generator, generator_before)
+        assert not unchanged(self.discriminator, discriminator_before)
+
+    def test_discriminator_step_changes_only_the_discriminator(self):
+        checks = {}
+
+        def at_discriminator_step():
+            checks["generator"] = snapshot(self.generator)
+
+        RecordingOptimizer(self.method.discriminator_optimizer, "discriminator", [], on_step=at_discriminator_step)
+
+        self.method.train_step(self.batch)
+        assert unchanged(self.generator, checks["generator"])
+
+    def test_generator_keeps_an_adversarial_gradient_through_the_frozen_discriminator(self):
+        self.method.set_discriminator_requires_grad(False)
+        state = self.method.forward_state(self.batch)
+        loss = self.method.compute_adversarial_losses(state)["group_a_to_group_b/adversarial"]
+        grad = torch.autograd.grad(loss, list(self.method.model.domains["group_b"].decoder.parameters()), allow_unused=True)
+        assert any(g is not None and g.abs().sum() > 0 for g in grad)
+
+    def test_pool_receives_the_pre_update_fake_values(self):
+        recorded = {}
+        forward_state = self.method.forward_state
+
+        def spy(batch):
+            state = forward_state(batch)
+            recorded["fake"] = state.pairs[("group_a", "group_b")].fake_bones.detach().clone()
+            return state
+
+        self.method.forward_state = spy
+        self.method.train_step(self.batch)
+
+        assert torch.equal(torch.cat(self.method.buffers["group_b"].items), recorded["fake"])
+
+    def test_empty_contact_stops_before_either_optimizer_changes_parameters(self):
+        self.method.cfg = PANReferenceConfig(contact_threshold=0.0)
+        generator_before, discriminator_before = snapshot(self.generator), snapshot(self.discriminator)
+
+        with pytest.raises(RuntimeError, match="contact threshold"):
+            self.method.train_step(self.batch)
+
+        assert unchanged(self.generator, generator_before)
+        assert unchanged(self.discriminator, discriminator_before)
+
+    def test_nonfinite_objective_stops_before_either_optimizer_changes_parameters(self):
+        self.batch["group_a"]["motion"][0, 0, -1] = float("nan")
+        generator_before, discriminator_before = snapshot(self.generator), snapshot(self.discriminator)
+
+        with pytest.raises(RuntimeError):
+            self.method.train_step(self.batch)
+
+        assert unchanged(self.generator, generator_before)
+        assert unchanged(self.discriminator, discriminator_before)
+
+    def test_diagnostics_are_finite(self):
+        self.method.cfg = PANReferenceConfig(loss_grad_norm_interval=1)
+        metrics = self.method.train_step(self.batch)
+
+        assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
+        assert metrics["grad/group_a/decoder"] > 0
+        assert metrics["grad/group_b/discriminator"] > 0
+        assert "loss_grad/group_a/reconstruction" in metrics
+        assert "loss_grad/group_a/discriminator" in metrics

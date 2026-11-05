@@ -138,6 +138,13 @@ def total(losses: Dict[str, torch.Tensor], total_name: str) -> tuple[torch.Tenso
     return loss, info
 
 
+def require_finite(losses: Dict[str, torch.Tensor]) -> None:
+    """ Stop before an optimizer step would apply a NaN or infinite loss to the weights. """
+    bad = [name for name, loss in losses.items() if not torch.isfinite(loss)]
+    if bad:
+        raise RuntimeError(f"Non-finite loss terms, no optimizer stepped on them: {bad}")
+
+
 def rest_height(offsets: torch.Tensor, parents: torch.Tensor) -> torch.Tensor:
     """ Rest-pose height (extent along the Z up axis) per skeleton: offsets [B, J, 3] -> [B]. """
     positions = [offsets[:, 0]]
