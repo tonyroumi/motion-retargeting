@@ -18,6 +18,7 @@ from motion_retargeting.modules.encoders import (
     ReferenceMotionEncoderConfig,
 )
 
+from .kinematics import end_effector_ids, path_heights
 from .masks import humanoid_chains
 
 if TYPE_CHECKING:
@@ -136,9 +137,31 @@ class PANReferenceDomainSpec:
         """ Network tokens: E edges + the root-position token, which is also J. """
         return self.num_joints
 
+    @property
+    def num_banks(self) -> int:
+        return self.offsets.shape[0]
+
+    @property
+    def ee_ids(self) -> List[int]:
+        return end_effector_ids(self.chains)
+
+    @property
+    def heights(self) -> torch.Tensor:
+        """ [K], from the validated chains' endpoints. """
+        return path_heights(self.offsets, self.parents.tolist(), self.chains)
+
     @classmethod
     def from_dataset(cls, dataset: ReferenceMotionDataset) -> PANReferenceDomainSpec:
         return cls(parents=dataset.parents, offsets=dataset.offsets, mean=dataset.mean, std=dataset.std)
+
+
+@dataclass
+class PANReferenceConfig:
+    recipe: str = REFERENCE_RECIPE
+
+    def __post_init__(self):
+        if self.recipe != REFERENCE_RECIPE:
+            raise ValueError(f"PANReferenceConfig only runs recipe '{REFERENCE_RECIPE}', got '{self.recipe}'")
 
 
 @dataclass

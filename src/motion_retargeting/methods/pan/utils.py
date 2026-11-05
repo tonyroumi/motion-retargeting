@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, NamedTuple
+from typing import Dict, NamedTuple, Tuple
 from dataclasses import  dataclass
 
 import torch
@@ -38,6 +38,49 @@ class DomainOutputs(NamedTuple):
     retargeted_into: torch.Tensor   # other -> d, judged by d's discriminator
     motion_code: torch.Tensor       # E_d(d)
     retargeted_code: torch.Tensor   # E_other(d -> other)
+
+
+@dataclass
+class ReferencePairOutputs:
+    """ One source -> destination route of the reference recipe (same-domain routes included). """
+    target_ids: torch.Tensor  # [B], the destination bank each sample is retargeted onto
+    fake: torch.Tensor        # [B, T, 4E + 3], normalized with the target's statistics
+    fake_code: torch.Tensor   # fake re-encoded by the destination's motion encoder
+    cycle: torch.Tensor       # [B, T, 4E + 3], decoded back onto the source's own banks
+
+
+@dataclass
+class ReferenceGeneratorOutputs:
+    motion_codes: Dict[str, torch.Tensor]
+    reconstructions: Dict[str, torch.Tensor]
+    pairs: Dict[Tuple[str, str], ReferencePairOutputs]
+
+
+@dataclass
+class ReferenceSourceState:
+    """ One domain's source batch and its reconstruction, in the spaces the losses use. """
+    bank_ids: torch.Tensor
+    motion: torch.Tensor
+    denormalized: torch.Tensor
+    bones: torch.Tensor  # bone_vectors_with_absolute_root, detached
+    reconstruction: torch.Tensor
+    reconstruction_denormalized: torch.Tensor
+    reconstruction_bones: torch.Tensor
+
+
+@dataclass
+class ReferencePairState:
+    target_ids: torch.Tensor
+    fake_bones: torch.Tensor   # With the target bank's statistics and offsets
+    cycle_bones: torch.Tensor  # With the source bank's statistics and offsets
+
+
+@dataclass
+class ReferenceForwardState:
+    """ One generator forward and its kinematics; both optimizer steps of a train step reuse it. """
+    outputs: ReferenceGeneratorOutputs
+    sources: Dict[str, ReferenceSourceState]
+    pairs: Dict[Tuple[str, str], ReferencePairState]
 
 
 def split_by_domain(outputs: GeneratorOutputs) -> Dict[str, DomainOutputs]:

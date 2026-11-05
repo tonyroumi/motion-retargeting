@@ -12,10 +12,28 @@ from motion_retargeting.methods.base import RetargetingMethod
 from motion_retargeting.resources.replay_buffer import ReplayBuffer
 from motion_retargeting.data.visualization.visualize import visualize_motion
 
-from .config import DomainSpec, PANConfig, PANModelConfig
+from .config import (
+    DomainSpec,
+    PANConfig,
+    PANModelConfig,
+    PANReferenceConfig,
+    PANReferenceDomainSpec,
+    PANReferenceModelConfig,
+)
 from .losses import adversarial_loss
-from .model import PANModel, GeneratorOutputs
-from .utils import GeneratorOutputs, restore_motion, split_by_domain, total, side_by_side, mpjpe, denormalize
+from .model import PANModel, PANReferenceModel, GeneratorOutputs
+from .utils import (
+    GeneratorOutputs,
+    ReferenceForwardState,
+    ReferencePairState,
+    ReferenceSourceState,
+    restore_motion,
+    split_by_domain,
+    total,
+    side_by_side,
+    mpjpe,
+    denormalize,
+)
 
 
 class PANMethod(RetargetingMethod):
@@ -346,3 +364,96 @@ class PANMethod(RetargetingMethod):
         self.model.load_state_dict(state_dict["model"])
         self.generator_optimizer.load_state_dict(state_dict["generator_optimizer"])
         self.discriminator_optimizer.load_state_dict(state_dict["discriminator_optimizer"])
+
+
+class PANReferenceMethod(PANMethod):
+    """
+    PAN's reference-Mixamo recipe: edge rotations and absolute root in, masked networks, positional
+    patch discriminators, and the reference objective and update order. Shares only the optimizer
+    gradient diagnostics with the legacy adaptation.
+    """
+
+    def __init__(
+        self,
+        model_cfg: PANReferenceModelConfig,
+        domain_specs: Dict[str, PANReferenceDomainSpec],
+        learning_rate: float = 1e-3,
+        device: str | torch.device = "cpu",
+        cfg: PANReferenceConfig | None = None,
+    ):
+        RetargetingMethod.__init__(self)
+
+        self.model_cfg = model_cfg
+        self.cfg = cfg if cfg is not None else PANReferenceConfig()
+        self.domain_specs = domain_specs
+
+        self.device = torch.device(device)
+
+        self.model = PANReferenceModel(model_cfg, domain_specs).to(self.device)
+
+        self.num_steps = 0
+
+    def forward_state(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> ReferenceForwardState:
+        """ One generator forward, with each route's FK on the bank that route's statistics belong to. """
+        outputs = self.model.forward_generator(batch)
+        domains = self.model.domains
+
+        sources = {}
+        for name, domain in domains.items():
+            bank_ids, motion = batch[name]["bank_id"], batch[name]["motion"]
+            reconstruction = outputs.reconstructions[name]
+            sources[name] = ReferenceSourceState(
+                bank_ids=bank_ids,
+                motion=motion,
+                denormalized=domain.denormalize(motion, bank_ids),
+                bones=domain.bones(motion, bank_ids).detach(),
+                reconstruction=reconstruction,
+                reconstruction_denormalized=domain.denormalize(reconstruction, bank_ids),
+                reconstruction_bones=domain.bones(reconstruction, bank_ids),
+            )
+
+        pairs = {}
+        for (source, destination), pair in outputs.pairs.items():
+            pairs[(source, destination)] = ReferencePairState(
+                target_ids=pair.target_ids,
+                fake_bones=domains[destination].bones(pair.fake, pair.target_ids),
+                cycle_bones=domains[source].bones(pair.cycle, sources[source].bank_ids),
+            )
+
+        return ReferenceForwardState(outputs=outputs, sources=sources, pairs=pairs)
+
+    @torch.no_grad()
+    def visualize(
+        self,
+        batch: Dict[str, Dict[str, torch.Tensor]],
+        save_dir: str | Path,
+        fps: float = 30.0,
+    ) -> None:
+        """
+        Save one animation per cross-domain route of the batch's first sample: the source motion (left)
+        next to it on a drawn target bank (right), both absolute-root world positions with no external
+        heading restored, as "<source>_to_<destination>.gif" in `save_dir`.
+        """
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        batch = {domain: {key: value[:1] for key, value in item.items()} for domain, item in batch.items()}
+        state = self.forward_state(batch)
+        domains = self.model.domains
+
+        for (source, destination), pair in state.pairs.items():
+            if source == destination:
+                continue
+
+            positions, parents = side_by_side(
+                domains[source].fk.world_positions(state.sources[source].bones)[0],
+                self.domain_specs[source].parents,
+                domains[destination].fk.world_positions(pair.fake_bones)[0],
+                self.domain_specs[destination].parents,
+            )
+            visualize_motion(
+                positions,
+                parent_indices=parents,
+                fps=fps,
+                save_path=save_dir / f"{source}_to_{destination}.gif",
+            )
