@@ -5,17 +5,40 @@ parity checks that run when PAN_REFERENCE_ROOT is set.
 
 from __future__ import annotations
 
+import copy
+import runpy
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
 import matplotlib
 
 matplotlib.use("Agg")
 
 import pytest
 import torch
+import yaml
 
-from motion_retargeting.methods.pan.config import PANReferenceConfig, PANReferenceDomainSpec, PANReferenceModelConfig
+from motion_retargeting.data.adapters import MotionSourceAdapter, base
+from motion_retargeting.data.representations.motion import MotionCollection, MotionData
+from motion_retargeting.data.representations.skeleton import SkeletonTopology
+from motion_retargeting.methods.pan.config import (
+    PANConfig,
+    PANModelConfig,
+    PANReferenceConfig,
+    PANReferenceDomainSpec,
+    PANReferenceModelConfig,
+)
 from motion_retargeting.methods.pan.losses import reference_end_effector_terms
-from motion_retargeting.methods.pan.method import PANReferenceMethod
+from motion_retargeting.methods.pan.method import PANMethod, PANReferenceMethod
+from motion_retargeting.methods.pan.utils import mpjpe, squared_error_over_height2
+from motion_retargeting.training.trainer import Trainer
 from pan_reference_support import ARGS, load_reference, requires_reference
+
+ROOT = Path(__file__).resolve().parents[1]
+TRAIN_SCRIPT = ROOT / "scripts" / "train.py"
+REFERENCE_CONFIG = ROOT / "configs" / "methods" / "pan_reference.yaml"
+LEGACY_CONFIG = ROOT / "configs" / "methods" / "pan.yaml"
 
 # The AMASS and CMU skeletons of configs/methods/pan_reference.yaml.
 AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
@@ -560,3 +583,234 @@ class TestUpdateOrder:
         assert metrics["grad/group_b/discriminator"] > 0
         assert "loss_grad/group_a/reconstruction" in metrics
         assert "loss_grad/group_a/discriminator" in metrics
+
+
+class TestMetrics:
+    def test_euclidean_mpjpe_is_distinct_from_squared_coordinate_error(self):
+        predicted = torch.zeros(1, 1, 1, 3)
+        target = torch.tensor([[[[3.0, 4.0, 0.0]]]])
+        heights = torch.tensor([2.0])
+
+        assert mpjpe(predicted, target) == pytest.approx(5.0)
+        # Averaged over coordinates: (9 + 16 + 0) / 3, then over height^2.
+        assert squared_error_over_height2(predicted, target, heights) == pytest.approx(25 / 3 / 4)
+
+    def test_validation_names_metrics_for_what_they_are(self):
+        method = make_method()
+        method.eval()
+        metrics = method.validation_step(make_batch(method.domain_specs))
+
+        for name in (
+            "retarget_latent_l1",
+            "retarget_realism",
+            "reconstruction_mse",
+            "reconstruction_mpjpe_m",
+            "reconstruction_squared_error_over_height2",
+            "cycle_mpjpe_m",
+            "cycle_squared_error_over_height2",
+        ):
+            assert torch.isfinite(torch.tensor(metrics[f"group_a/val/{name}"])), name
+        assert not any("paired" in name or "retarget_accuracy" in name for name in metrics)
+
+    def test_realism_reads_discriminator_positions(self):
+        method = make_method()
+        method.eval()
+        batch = make_batch(method.domain_specs)
+
+        inputs = []
+        method.model.domains["group_b"].discriminator.register_forward_pre_hook(lambda module, args: inputs.append(args[0]))
+        method.validation_step(batch)
+        assert inputs[0].shape == (BATCH_SIZE, WINDOW, 24, 3)
+
+
+class TestCheckpoints:
+    def test_round_trip_preserves_banks_masks_and_decoding(self, tmp_path):
+        specs = make_specs()
+        method = make_method(specs, seed=0)
+        method.eval()
+
+        path = tmp_path / "checkpoint.pt"
+        torch.save(method.state_dict(), path)
+        state = torch.load(path, weights_only=True)
+        assert state["recipe"]["reference_commit"].startswith("5a51d92")
+        assert state["recipe"]["physical_units"] == "metres"
+        assert state["recipe"]["domains"]["group_a"]["end_effector_ids"] == [10, 11, 15, 20, 21]
+
+        restored = make_method(specs, seed=1)
+        restored.eval()
+        assert not torch.equal(restored.model.domains["group_a"].decoder.conv1.weight, method.model.domains["group_a"].decoder.conv1.weight)
+        restored.load_state_dict(state)
+
+        for key, value in method.model.state_dict().items():
+            assert torch.equal(restored.model.state_dict()[key], value), key
+        assert any(key.endswith("attention_mask") for key in state["model"])
+        assert any(key.endswith("conv2.mask") for key in state["model"])
+        assert any(key.endswith("mean") for key in state["model"])
+
+        batch = make_batch(specs)
+        torch.manual_seed(9)
+        original = method.forward_state(batch)
+        torch.manual_seed(9)
+        reloaded = restored.forward_state(batch)
+        assert torch.equal(
+            original.pairs[("group_a", "group_b")].fake_bones,
+            reloaded.pairs[("group_a", "group_b")].fake_bones,
+        )
+
+    def test_legacy_checkpoint_gets_a_clear_error(self):
+        method = make_method()
+        legacy_state = {key: value for key, value in method.state_dict().items() if key != "recipe"}
+        with pytest.raises(ValueError, match="legacy PAN recipe"):
+            method.load_state_dict(legacy_state)
+
+    def test_incompatible_setup_is_rejected(self):
+        method = make_method()
+        state = copy.deepcopy(method.state_dict())
+        state["recipe"]["mask_recipe"] = "repaired_masks"
+        with pytest.raises(ValueError, match="mask_recipe"):
+            method.load_state_dict(state)
+
+        generator = torch.Generator().manual_seed(0)
+        other_banks = make_specs()
+        other_banks["group_a"] = make_spec(AMASS_PARENTS, NUM_BANKS["group_a"] + 1, generator)
+        with pytest.raises(ValueError, match="domains"):
+            make_method(other_banks).load_state_dict(method.state_dict())
+
+
+class TestRecipeConfig:
+    def test_legacy_is_the_default_and_unknown_recipes_are_rejected(self):
+        assert PANConfig().recipe == "legacy"
+        with pytest.raises(ValueError):
+            PANConfig(recipe="mixamo_reference ")
+        with pytest.raises(ValueError):
+            PANReferenceConfig(recipe="legacy")
+
+    def test_yaml_settings(self):
+        cfg = yaml.safe_load(REFERENCE_CONFIG.read_text())
+        assert cfg["method"]["params"]["recipe"] == "mixamo_reference"
+        assert cfg["trainer"]["batch_size"] == 128
+        assert cfg["trainer"]["learning_rate"] == 0.001
+        assert cfg["trainer"]["num_epochs"] == 1001
+        assert "disc_logit_reg" not in cfg["method"]["params"]
+        assert "grad_norm_clip" not in cfg["method"]["params"]
+        for group in cfg["dataset"].values():
+            assert group["params"]["sequence_length"] == 64
+            assert group["params"]["stride"] == 32
+
+        PANReferenceConfig(**cfg["method"]["params"])
+        model_cfg = PANReferenceModelConfig.from_dict(cfg["method"]["model"])
+        assert model_cfg == PANReferenceModelConfig()
+
+    def test_adam_settings_have_no_schedule_or_decay(self):
+        method = make_method()
+        for optimizer in (method.generator_optimizer, method.discriminator_optimizer):
+            group = optimizer.param_groups[0]
+            assert group["betas"] == (0.9, 0.999)
+            assert group["weight_decay"] == 0
+
+    def test_legacy_yaml_has_no_recipe_key(self):
+        assert "recipe" not in yaml.safe_load(LEGACY_CONFIG.read_text())["method"]["params"]
+
+
+def smooth_clip(num_joints: int, offset_scale: float, seed: int) -> MotionData:
+    """ Near-rest motion, slow enough to hold contact frames. """
+    generator = torch.Generator().manual_seed(seed)
+    frames = 130
+
+    rotations = torch.zeros(frames, num_joints, 4)
+    rotations[..., 0] = 1.0
+    phase = torch.linspace(0, 6.28, frames)[:, None, None]
+    rotations = rotations + 0.01 * torch.randn(1, num_joints, 4, generator=generator) * phase.sin()
+    rotations = torch.nn.functional.normalize(rotations, dim=-1)
+
+    offsets = offset_scale * 0.1 * torch.ones(num_joints, 3)
+    offsets[0] = 0.0
+    root = torch.linspace(0, 1, frames)[:, None] * torch.tensor([0.1, 0.0, 0.1]) + torch.tensor([0.0, 0.9, 0.0])
+
+    return MotionData(offsets=offsets, joint_rotations=rotations, fps=30.0, root_position=root)
+
+
+def write_config(path: Path, tmp_path: Path) -> Path:
+    cfg = yaml.safe_load(path.read_text())
+    cfg["device"] = "cpu"
+    cfg["trainer"].update(batch_size=2, num_epochs=1, validation_interval=1, checkpoint_interval=1, log_dir=str(tmp_path / "logs"), use_tensorboard=False, verbose=False)
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump(cfg))
+    return config
+
+
+def run_training(config: Path, monkeypatch) -> SimpleNamespace:
+    """ Runs scripts/train.py as a script, returning the method and trainer it built. """
+    captured = SimpleNamespace()
+    train = Trainer.train
+
+    def spy(self):
+        captured.method, captured.trainer = self.method, self
+        return train(self)
+
+    monkeypatch.setattr(Trainer, "train", spy)
+    monkeypatch.setattr(sys, "argv", ["train.py", "--config", str(config)])
+    runpy.run_path(str(TRAIN_SCRIPT), run_name="__main__")
+    return captured
+
+
+class TestEndToEnd:
+    def test_reference_config_reaches_the_reference_branches(self, tmp_path, monkeypatch):
+        class Source:
+            def __init__(self, name):
+                parents = {"amass": AMASS_PARENTS, "cmu": CMU_PARENTS}[name]
+                self.collection = MotionCollection(
+                    topology=SkeletonTopology(parents=torch.tensor(parents)),
+                    motions=[smooth_clip(len(parents), scale, seed) for seed, scale in enumerate((1.0, 1.0, 1.5))],
+                )
+
+            def load(self):
+                return self.collection
+
+        monkeypatch.setattr("motion_retargeting.methods.pan.data.build_adapter", Source)
+
+        run = run_training(write_config(REFERENCE_CONFIG, tmp_path), monkeypatch)
+
+        assert isinstance(run.method, PANReferenceMethod)
+        assert run.method.domain_specs["group_a"].num_banks == 2
+
+        checkpoint = torch.load(run.trainer.checkpoint_dir / "final.pt", weights_only=True)
+        assert checkpoint["method"]["recipe"]["recipe"] == "mixamo_reference"
+
+        gifs = list(run.trainer.visualization_dir.rglob("*.gif"))
+        assert {gif.name for gif in gifs} == {"group_a_to_group_b.gif", "group_b_to_group_a.gif"}
+
+        run.trainer.load_checkpoint(run.trainer.checkpoint_dir / "final.pt")
+
+    def test_existing_pan_config_still_runs_the_legacy_method(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(base, "PATHS", SimpleNamespace(data_root=tmp_path))
+        monkeypatch.setattr(base, "label_joint_bodies", lambda topology, offsets: {
+            0: list(range(topology.num_joints // 2)),
+            1: list(range(topology.num_joints // 2, topology.num_joints)),
+        })
+
+        class Source(MotionSourceAdapter):
+            def __init__(self, name):
+                super().__init__(name)
+                self.parents = {"amass": AMASS_PARENTS, "cmu": CMU_PARENTS}[name]
+
+            def _extract(self):
+                clips = [smooth_clip(len(self.parents), 1.0, seed) for seed in range(30)]
+                return [
+                    self._construct_motion(
+                        parents=self.parents,
+                        offsets=clip.offsets,
+                        joint_rotations=clip.joint_rotations,
+                        root_position=clip.root_position,
+                        fps=clip.fps,
+                    )
+                    for clip in clips
+                ]
+
+        monkeypatch.setattr("motion_retargeting.data.factory.build_adapter", Source)
+
+        run = run_training(write_config(LEGACY_CONFIG, tmp_path), monkeypatch)
+
+        assert type(run.method) is PANMethod
+        assert isinstance(run.method.model_cfg, PANModelConfig)
+        assert "recipe" not in torch.load(run.trainer.checkpoint_dir / "final.pt", weights_only=True)["method"]

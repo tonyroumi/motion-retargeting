@@ -19,6 +19,7 @@ from .config import (
     PANReferenceConfig,
     PANReferenceDomainSpec,
     PANReferenceModelConfig,
+    REFERENCE_RECIPE,
 )
 from .kinematics import end_effector_velocity
 from .losses import (
@@ -27,6 +28,7 @@ from .losses import (
     reference_end_effector_terms,
     reference_generator_adversarial_loss,
 )
+from .masks import MASK_RECIPE
 from .model import PANModel, PANReferenceModel, GeneratorOutputs
 from .utils import (
     GeneratorOutputs,
@@ -38,9 +40,13 @@ from .utils import (
     split_by_domain,
     total,
     side_by_side,
+    squared_error_over_height2,
     mpjpe,
     denormalize,
 )
+
+# The pinned reference commit the "mixamo_reference" recipe's computation was ported from.
+REFERENCE_COMMIT = "5a51d929fbb3c804494f1d3c58e4558c3be8e35d"
 
 
 class PANMethod(RetargetingMethod):
@@ -454,6 +460,47 @@ class PANReferenceMethod(PANMethod):
 
         return {**generator_info, **discriminator_info, **grad_info}
 
+    @torch.no_grad()
+    def validation_step(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> Dict[str, float]:
+        """
+        Unpaired diagnostics, keyed "<domain>/val/<metric>" for source motion of <domain>:
+          - *_mse:                          the normalized network channels
+          - *_mpjpe_m:                      Euclidean world joint error, in metres
+          - *_squared_error_over_height2:   mean squared world coordinate error / height^2, the form
+                                            of the reference's metric on an unpaired, non-reference task
+          - retarget_latent_l1, retarget_realism: of the cross-domain route
+
+        There is no paired ground truth here: neither is paired retarget accuracy, and neither is
+        comparable to a paper score. The holdout's statistics include its own windows.
+        """
+        state = self.forward_state(batch)
+        domains = self.model.domains
+        metrics = {}
+
+        for name, source in state.sources.items():
+            other = next(domain for domain in domains if domain != name)
+            fk = domains[name].fk
+            heights = domains[name].heights[source.bank_ids]
+
+            positions = fk.world_positions(source.bones)
+            reconstruction = fk.world_positions(source.reconstruction_bones)
+            cycle = fk.world_positions(state.pairs[(name, other)].cycle_bones)
+
+            prefix = f"{name}/val/"
+            metrics.update({
+                prefix + "retarget_latent_l1": F.l1_loss(
+                    state.outputs.pairs[(name, other)].fake_code, state.outputs.motion_codes[name]
+                ).item(),
+                prefix + "retarget_realism": domains[other].discriminator(state.pairs[(name, other)].fake_bones).mean().item(),
+                prefix + "reconstruction_mse": F.mse_loss(source.reconstruction, source.motion).item(),
+                prefix + "reconstruction_mpjpe_m": mpjpe(reconstruction, positions),
+                prefix + "reconstruction_squared_error_over_height2": squared_error_over_height2(reconstruction, positions, heights),
+                prefix + "cycle_mpjpe_m": mpjpe(cycle, positions),
+                prefix + "cycle_squared_error_over_height2": squared_error_over_height2(cycle, positions, heights),
+            })
+
+        return metrics
+
     def set_discriminator_requires_grad(self, requires_grad: bool) -> None:
         for parameter in self.model.discriminator_parameters():
             parameter.requires_grad_(requires_grad)
@@ -613,3 +660,40 @@ class PANReferenceMethod(PANMethod):
                 fps=fps,
                 save_path=save_dir / f"{source}_to_{destination}.gif",
             )
+
+    def recipe_metadata(self) -> Dict[str, Any]:
+        """ What a checkpoint's weights mean. The banks' values live in the model's persistent buffers. """
+        return {
+            "recipe": REFERENCE_RECIPE,
+            "reference_commit": REFERENCE_COMMIT,
+            "representation": "edge_parent_quaternions_absolute_root_xyz",
+            "physical_units": "metres",
+            "normalization_scope": "per_skeleton_bank_all_channels_before_holdout",
+            "mask_recipe": MASK_RECIPE,
+            "domains": {
+                name: {
+                    "parents": spec.parents.tolist(),
+                    "num_skeleton_banks": spec.num_banks,
+                    "end_effector_ids": spec.ee_ids,
+                }
+                for name, spec in self.domain_specs.items()
+            },
+        }
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {**super().state_dict(), "recipe": self.recipe_metadata()}
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """ Rejects legacy or otherwise incompatible checkpoints rather than reusing their weights. """
+        if "recipe" not in state_dict:
+            raise ValueError(
+                f"This checkpoint has no recipe metadata, so it is from the legacy PAN recipe and "
+                f"cannot be loaded into '{REFERENCE_RECIPE}'."
+            )
+
+        expected, found = self.recipe_metadata(), state_dict["recipe"]
+        different = [key for key in expected if found.get(key) != expected[key]]
+        if different:
+            raise ValueError(f"Checkpoint is incompatible with this '{REFERENCE_RECIPE}' setup, differing in: {different}")
+
+        super().load_state_dict(state_dict)

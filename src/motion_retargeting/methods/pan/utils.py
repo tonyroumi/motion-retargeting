@@ -159,6 +159,12 @@ def mpjpe(predicted: torch.Tensor, target: torch.Tensor) -> float:
     return (predicted - target).norm(dim=-1).mean().item()
 
 
+def squared_error_over_height2(predicted: torch.Tensor, target: torch.Tensor, heights: torch.Tensor) -> float:
+    """ Mean squared coordinate error / height^2: predicted, target [B, ..., J, 3], heights [B]. Not MPJPE. """
+    heights = heights.reshape(-1, *[1] * (predicted.ndim - 1))
+    return (((predicted - target) / heights) ** 2).mean().item()
+
+
 def side_by_side(
     left: torch.Tensor,
     left_parents: torch.Tensor,

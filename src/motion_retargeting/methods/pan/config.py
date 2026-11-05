@@ -71,6 +71,9 @@ class DomainSpec:
 
 @dataclass 
 class PANConfig:
+    # This class and PANMethod are the legacy recipe; see REFERENCE_RECIPE for the other one.
+    recipe: str = LEGACY_RECIPE
+
     # Discriminator replay buffer
     replay_buffer_size: int = 50
     swap_probability: float = 0.5
@@ -89,6 +92,10 @@ class PANConfig:
 
     # Log each loss term's gradient norm every N train steps (0 disables; one extra backward per term)
     loss_grad_norm_interval: int = 0
+
+    def __post_init__(self):
+        if self.recipe != LEGACY_RECIPE:
+            raise ValueError(f"Unknown PAN recipe '{self.recipe}'; expected '{LEGACY_RECIPE}' or '{REFERENCE_RECIPE}'")
 
 
 @dataclass

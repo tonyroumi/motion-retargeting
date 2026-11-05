@@ -127,6 +127,18 @@ class TestSnapshots:
         assert chains == before
 
 
+class TestSourceNumbering:
+    def test_cmu_depth_first_numbering_keeps_the_shift_within_a_chain(self):
+        rows_cmu = rows(temporal_conv_mask(humanoid_chains(CMU_PARENTS), 24))
+        assert rows_cmu[0] == [0, 1, 2, 23]  # Left leg edges 0-3, shifted to 0-2.
+
+    def test_amass_numbering_makes_the_reference_shift_cross_chains(self):
+        """ Pins a known consequence of keeping ascending-child edges with the double conversion. """
+        rows_amass = rows(temporal_conv_mask(humanoid_chains(AMASS_PARENTS), 22))
+        # The left leg's shortcut reads edges 2, 5, 8, whose children are spine joints 3, 6, 9.
+        assert rows_amass[0] == [2, 5, 8, 21]
+
+
 class TestAttentionRules:
     def setup_method(self):
         self.chains = humanoid_chains(PARENTS_23)

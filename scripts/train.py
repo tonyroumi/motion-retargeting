@@ -8,9 +8,17 @@ from torch.utils.data import DataLoader, RandomSampler, Subset
 
 from motion_retargeting.data.dataset import compute_stats, split_dataset
 from motion_retargeting.data.factory import build_datasets
-from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig, REFERENCE_RECIPE
+from motion_retargeting.methods.pan.config import (
+    DomainSpec,
+    PANConfig,
+    PANModelConfig,
+    PANReferenceConfig,
+    PANReferenceDomainSpec,
+    PANReferenceModelConfig,
+    REFERENCE_RECIPE,
+)
 from motion_retargeting.methods.pan.data import build_reference_splits
-from motion_retargeting.methods.pan.method import PANMethod
+from motion_retargeting.methods.pan.method import PANMethod, PANReferenceMethod
 from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
 from motion_retargeting.methods.san.method import SANMethod
 from motion_retargeting.training.trainer import Trainer, TrainerConfig
@@ -22,6 +30,9 @@ METHODS = {
     "pan": (DomainSpec, PANModelConfig, PANConfig, PANMethod),
     "san": (SANDomainSpec, SANModelConfig, SANConfig, SANMethod),
 }
+
+# Selected by `method.params.recipe: mixamo_reference` under method name "pan".
+PAN_REFERENCE_METHOD = (PANReferenceDomainSpec, PANReferenceModelConfig, PANReferenceConfig, PANReferenceMethod)
 
 
 parser = argparse.ArgumentParser()
@@ -97,7 +108,9 @@ def main():
         for name, dataset in val_datasets.items()
     }
 
-    spec_cls, model_cfg_cls, method_cfg_cls, method_cls = METHODS[cfg["method"]["name"]]
+    spec_cls, model_cfg_cls, method_cfg_cls, method_cls = (
+        PAN_REFERENCE_METHOD if uses_reference_recipe(cfg["method"]) else METHODS[cfg["method"]["name"]]
+    )
 
     specs = {
         name: spec_cls.from_dataset(dataset)
