@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader, RandomSampler, Subset
 
 from motion_retargeting.data.dataset import compute_stats, split_dataset
 from motion_retargeting.data.factory import build_datasets
-from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
+from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig, REFERENCE_RECIPE
+from motion_retargeting.methods.pan.data import build_reference_splits
 from motion_retargeting.methods.pan.method import PANMethod
 from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
 from motion_retargeting.methods.san.method import SANMethod
@@ -34,33 +35,42 @@ parser.add_argument(
 args = parser.parse_args()
 
 
+def uses_reference_recipe(method_cfg: dict) -> bool:
+    """ Whether the config selects PAN's reference-Mixamo recipe; PAN stays legacy by default. """
+    return method_cfg["name"] == "pan" and (method_cfg.get("params") or {}).get("recipe") == REFERENCE_RECIPE
+
+
 def main():
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
 
     device = torch.device(cfg["device"])
 
-    datasets = build_datasets(cfg["dataset"])
-
     trainer_cfg = cfg["trainer"]
 
-    # Split every domain, then normalize all of its splits with stats from its train split only.
-    train_datasets, val_datasets, test_datasets = {}, {}, {}
-    for name, dataset in datasets.items():
-        train_dataset, val_dataset, test_dataset = split_dataset(
-            dataset,
-            val_fraction=trainer_cfg["val_fraction"],
-            test_fraction=trainer_cfg["test_fraction"],
-        )
-        vel_mean, vel_std, ang_mean, ang_std = compute_stats(train_dataset)
+    if uses_reference_recipe(cfg["method"]):
+        # Built from the raw collections: the shared windows below have no absolute root or edges.
+        train_datasets, val_datasets = build_reference_splits(cfg["dataset"])
+    else:
+        datasets = build_datasets(cfg["dataset"])
 
-        train_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
-        val_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
-        test_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
+        # Split every domain, then normalize all of its splits with stats from its train split only.
+        train_datasets, val_datasets, test_datasets = {}, {}, {}
+        for name, dataset in datasets.items():
+            train_dataset, val_dataset, test_dataset = split_dataset(
+                dataset,
+                val_fraction=trainer_cfg["val_fraction"],
+                test_fraction=trainer_cfg["test_fraction"],
+            )
+            vel_mean, vel_std, ang_mean, ang_std = compute_stats(train_dataset)
 
-        train_datasets[name] = train_dataset
-        val_datasets[name] = val_dataset
-        test_datasets[name] = test_dataset
+            train_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
+            val_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
+            test_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
+
+            train_datasets[name] = train_dataset
+            val_datasets[name] = val_dataset
+            test_datasets[name] = test_dataset
 
     # Draw the same number of samples from every domain each epoch (a fresh random subset
     # of the larger ones), so the zipped loaders always yield equally sized batches.

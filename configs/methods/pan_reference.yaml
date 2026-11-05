@@ -1,0 +1,34 @@
+# PAN reference-Mixamo recipe, computed on the existing AMASS / CMU sources. Selected by
+# method.params.recipe; configs/methods/pan.yaml stays the legacy adaptation.
+#
+# Deviations from the original Mixamo assets (see README):
+#   - Skeleton banks: clips with exactly equal offsets stand in for Mixamo characters.
+#   - Statistics are fit per bank before the holdout, as the reference does, so the holdout is a
+#     reproduction diagnostic and not clean evidence of generalization.
+#   - Frames are resampled to target_fps on a timestamp grid, not with Mixamo's literal ::2.
+device: cuda
+
+dataset:
+  group_a:
+    sources:
+      - amass
+    params:
+      sequence_length: 64
+      stride: 32
+      target_fps: 30
+      holdout_percent: 5
+
+  group_b:
+    sources:
+      - cmu
+    params:
+      sequence_length: 64
+      stride: 32
+      target_fps: 30
+      holdout_percent: 5
+
+method:
+  name: pan
+
+  params:
+    recipe: mixamo_reference

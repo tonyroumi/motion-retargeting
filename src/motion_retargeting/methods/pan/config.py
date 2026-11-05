@@ -14,6 +14,10 @@ from motion_retargeting.modules.decoders import MotionDecoderConfig
 from motion_retargeting.modules.discriminators import MotionDiscriminatorConfig
 from motion_retargeting.modules.encoders import BodyPartEncoderConfig, MotionEncoderConfig
 
+# Value of `method.params.recipe` selecting the reference-Mixamo computation.
+LEGACY_RECIPE = "legacy"
+REFERENCE_RECIPE = "mixamo_reference"
+
 
 @dataclass(frozen=True)
 class DomainSpec:
