@@ -7,7 +7,7 @@ from torch import nn
 import torch
 
 from motion_retargeting.modules.decoders import MotionDecoder, ReferenceMotionDecoder
-from motion_retargeting.modules.discriminators import MotionDiscriminator
+from motion_retargeting.modules.discriminators import MotionDiscriminator, ReferenceMotionDiscriminator
 from motion_retargeting.modules.encoders import (
     BodyPartEncoder,
     MotionEncoder,
@@ -174,6 +174,10 @@ class PANReferenceDomain(nn.Module):
             output_connectivity=parts_to_tokens(conv_mask, part_dim, 4),
             **asdict(cfg.motion_decoder),
         )
+        self.discriminator = ReferenceMotionDiscriminator(
+            input_dim=spec.num_joints * 3,
+            **asdict(cfg.motion_discriminator),
+        )
 
     def denormalize(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
         """ [B, T, 4E + 3], with each sample's bank statistics. """
@@ -242,3 +246,7 @@ class PANReferenceModel(nn.Module):
             yield from domain.motion_encoder.parameters()
             yield from domain.body_part_encoder.parameters()
             yield from domain.decoder.parameters()
+
+    def discriminator_parameters(self) -> Iterator[nn.Parameter]:
+        for domain in self.domains.values():
+            yield from domain.discriminator.parameters()

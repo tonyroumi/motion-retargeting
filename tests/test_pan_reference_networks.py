@@ -20,7 +20,9 @@ from motion_retargeting.methods.pan.masks import (
     temporal_conv_mask,
     tokens_to_parts,
 )
+from motion_retargeting.methods.pan.losses import reference_discriminator_loss, reference_generator_adversarial_loss
 from motion_retargeting.modules.decoders import ReferenceMotionDecoder
+from motion_retargeting.modules.discriminators import ReferenceMotionDiscriminator
 from motion_retargeting.modules.encoders import ReferenceBodyPartEncoder, ReferenceMotionEncoder, ReferenceMotionEncoderConfig
 from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, load_reference, local_parents, on_cpu, reference_edges, requires_reference
 
@@ -67,6 +69,9 @@ def copy_weights(reference_module, module, names: dict) -> None:
     assert all(key.endswith("mask") for key in result.missing_keys)
 
 
+DISCRIMINATOR_LAYERS = {
+    f"conv{i + 1}.{kind}": f"layers.{i}.0.{kind}" for i in range(3) for kind in ("weight", "bias")
+}
 DECODER_LAYERS = {
     "conv1.weight": "layers.0.1.weight",
     "conv1.bias": "layers.0.1.bias",
@@ -346,3 +351,58 @@ class TestDecoderAgainstReference:
         assert torch.allclose(local_code.grad.flatten(2, 3).transpose(1, 2), remote_code.grad, atol=ATOL, rtol=RTOL)
         remote_grads = {name: parameter.grad for name, parameter in reference_decoder.named_parameters() if parameter.grad is not None}
         assert_gradients_match(decoder, remote_grads, DECODER_LAYERS)
+
+
+class TestDiscriminator:
+    def test_keeps_batch_and_patch_axes(self):
+        discriminator = ReferenceMotionDiscriminator(input_dim=69)
+        assert discriminator(torch.randn(2, 64, 23, 3)).shape == (2, 50)
+        assert discriminator(torch.randn(1, 64, 23, 3)).shape == (1, 50)
+
+    def test_layout(self):
+        discriminator = ReferenceMotionDiscriminator(input_dim=69)
+        assert [discriminator.conv1.kernel_size, discriminator.conv2.kernel_size, discriminator.conv3.kernel_size] == [(15,), (1,), (1,)]
+        assert [discriminator.conv1.padding, discriminator.conv1.stride] == [(0,), (1,)]
+        assert [discriminator.conv1.out_channels, discriminator.conv2.out_channels, discriminator.conv3.out_channels] == [256, 128, 1]
+
+    def test_scores_are_probabilities(self):
+        scores = ReferenceMotionDiscriminator(input_dim=69)(100.0 * torch.randn(2, 64, 23, 3))
+        assert ((scores >= 0) & (scores <= 1)).all()
+
+
+class TestGANLosses:
+    def test_patch_errors_are_averaged_not_scores(self):
+        # A mean score of 0.5 would give 0.25; averaging squared patch errors gives 0.5.
+        assert reference_generator_adversarial_loss(torch.tensor([[0.0, 1.0]])).item() == pytest.approx(0.5)
+
+    def test_discriminator_label_convention_and_half_factor(self):
+        ones, zeros = torch.ones(2, 50), torch.zeros(2, 50)
+        assert reference_discriminator_loss(ones, zeros).item() == 0.0
+        assert reference_discriminator_loss(zeros, ones).item() == 1.0
+
+
+@requires_reference
+class TestDiscriminatorAgainstReference:
+    @FIXTURES
+    def test_output_and_gradients_match(self, topology):
+        reference = load_reference()
+        num_joints = len(topology)
+        reference_discriminator = reference.LatentDiscriminator(3, 15, num_joints * 3, 256, is_lafan1=False)
+        discriminator = ReferenceMotionDiscriminator(input_dim=num_joints * 3)
+        copy_weights(reference_discriminator, discriminator, DISCRIMINATOR_LAYERS)
+
+        positions = torch.randn(2, 64, num_joints, 3)
+        local_input = positions.clone().requires_grad_(True)
+        remote_input = positions.clone().requires_grad_(True)
+
+        local, remote = discriminator(local_input), reference_discriminator(remote_input)
+        assert local.shape == remote.shape == (2, 50)
+        assert torch.allclose(local, remote, atol=ATOL, rtol=RTOL)
+
+        target = torch.randn_like(local)
+        (local * target).sum().backward()
+        (remote * target).sum().backward()
+
+        assert torch.allclose(local_input.grad, remote_input.grad, atol=ATOL, rtol=RTOL)
+        remote_grads = {name: parameter.grad for name, parameter in reference_discriminator.named_parameters()}
+        assert_gradients_match(discriminator, remote_grads, DISCRIMINATOR_LAYERS)

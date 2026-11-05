@@ -20,7 +20,7 @@ from .config import (
     PANReferenceDomainSpec,
     PANReferenceModelConfig,
 )
-from .losses import adversarial_loss
+from .losses import adversarial_loss, reference_discriminator_loss, reference_generator_adversarial_loss
 from .model import PANModel, PANReferenceModel, GeneratorOutputs
 from .utils import (
     GeneratorOutputs,
@@ -391,6 +391,18 @@ class PANReferenceMethod(PANMethod):
 
         self.model = PANReferenceModel(model_cfg, domain_specs).to(self.device)
 
+        self.generator_optimizer = torch.optim.Adam(
+            self.model.generator_parameters(), lr=learning_rate, betas=(0.9, 0.999)
+        )
+        self.discriminator_optimizer = torch.optim.Adam(
+            self.model.discriminator_parameters(), lr=learning_rate, betas=(0.9, 0.999)
+        )
+
+        self.buffers = {
+            domain: ReplayBuffer(self.cfg.replay_buffer_size, self.cfg.swap_probability)
+            for domain in self.domain_specs
+        }
+
         self.num_steps = 0
 
     def forward_state(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> ReferenceForwardState:
@@ -421,6 +433,28 @@ class PANReferenceMethod(PANMethod):
             )
 
         return ReferenceForwardState(outputs=outputs, sources=sources, pairs=pairs)
+
+    def compute_adversarial_losses(self, state: ReferenceForwardState) -> Dict[str, torch.Tensor]:
+        """ Cross-domain routes only: each fake's positions, judged by its destination's discriminator. """
+        losses = {}
+        for (source, destination), pair in state.pairs.items():
+            if source != destination:
+                scores = self.model.domains[destination].discriminator(pair.fake_bones)
+                losses[f"{source}_to_{destination}/adversarial"] = reference_generator_adversarial_loss(scores)
+        return losses
+
+    def compute_discriminator_losses(self, state: ReferenceForwardState) -> Dict[str, torch.Tensor]:
+        """ Per domain: its real positions against fakes retargeted into it, detached and replayed. """
+        losses = {}
+        for (source, destination), pair in state.pairs.items():
+            if source != destination:
+                discriminator = self.model.domains[destination].discriminator
+                fake = self.buffers[destination].query(pair.fake_bones.detach())
+                losses[f"{destination}/discriminator"] = reference_discriminator_loss(
+                    discriminator(state.sources[destination].bones),
+                    discriminator(fake),
+                )
+        return losses
 
     @torch.no_grad()
     def visualize(

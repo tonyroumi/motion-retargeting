@@ -47,5 +47,12 @@ method:
       kernel_size: 15
       upsample_mode: linear
 
+    motion_discriminator:
+      hidden_dim: 256
+      kernel_size: 15
+
   params:
     recipe: mixamo_reference
+
+    replay_buffer_size: 50
+    swap_probability: 0.5

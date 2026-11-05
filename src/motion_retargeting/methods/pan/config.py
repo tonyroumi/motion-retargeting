@@ -11,7 +11,7 @@ import torch
 
 from motion_retargeting.data.dataset import MotionDataset, FeatureStats
 from motion_retargeting.modules.decoders import MotionDecoderConfig, ReferenceMotionDecoderConfig
-from motion_retargeting.modules.discriminators import MotionDiscriminatorConfig
+from motion_retargeting.modules.discriminators import MotionDiscriminatorConfig, ReferenceMotionDiscriminatorConfig
 from motion_retargeting.modules.encoders import (
     BodyPartEncoderConfig,
     MotionEncoderConfig,
@@ -159,6 +159,10 @@ class PANReferenceDomainSpec:
 class PANReferenceConfig:
     recipe: str = REFERENCE_RECIPE
 
+    # Discriminator replay buffer, holding discriminator-space positions
+    replay_buffer_size: int = 50
+    swap_probability: float = 0.5
+
     def __post_init__(self):
         if self.recipe != REFERENCE_RECIPE:
             raise ValueError(f"PANReferenceConfig only runs recipe '{REFERENCE_RECIPE}', got '{self.recipe}'")
@@ -168,6 +172,7 @@ class PANReferenceConfig:
 class PANReferenceModelConfig:
     motion_encoder: ReferenceMotionEncoderConfig = field(default_factory=ReferenceMotionEncoderConfig)
     motion_decoder: ReferenceMotionDecoderConfig = field(default_factory=ReferenceMotionDecoderConfig)
+    motion_discriminator: ReferenceMotionDiscriminatorConfig = field(default_factory=ReferenceMotionDiscriminatorConfig)
 
     @classmethod
     def from_dict(cls, cfg: Dict[str, Any]) -> PANReferenceModelConfig:
@@ -175,4 +180,5 @@ class PANReferenceModelConfig:
         return cls(
             motion_encoder=ReferenceMotionEncoderConfig(**cfg.get("motion_encoder", {})),
             motion_decoder=ReferenceMotionDecoderConfig(**cfg.get("motion_decoder", {})),
+            motion_discriminator=ReferenceMotionDiscriminatorConfig(**cfg.get("motion_discriminator", {})),
         )

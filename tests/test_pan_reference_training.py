@@ -179,3 +179,50 @@ class TestRoutes:
         method.visualize(make_batch(method.domain_specs, batch_size=1), tmp_path, fps=30.0)
         assert (tmp_path / "group_a_to_group_b.gif").exists()
         assert (tmp_path / "group_b_to_group_a.gif").exists()
+
+
+class TestGANRoutes:
+    def test_cross_routes_only(self):
+        method = make_method()
+        losses = method.compute_adversarial_losses(method.forward_state(make_batch(method.domain_specs)))
+        assert set(losses) == {"group_a_to_group_b/adversarial", "group_b_to_group_a/adversarial"}
+
+    def test_generator_gan_reaches_source_encoder_target_decoder_and_static_encoder_only(self):
+        method = make_method()
+        state = method.forward_state(make_batch(method.domain_specs))
+        loss = method.compute_adversarial_losses(state)["group_a_to_group_b/adversarial"]
+
+        a, b = method.model.domains["group_a"], method.model.domains["group_b"]
+        reached = lambda module: any(  # noqa: E731
+            grad is not None and grad.abs().sum() > 0
+            for grad in torch.autograd.grad(loss, list(module.parameters()), retain_graph=True, allow_unused=True)
+        )
+
+        assert reached(a.motion_encoder)
+        assert reached(b.decoder)
+        assert reached(b.body_part_encoder)
+        assert not reached(b.motion_encoder)
+        assert not reached(a.decoder)
+        assert not reached(a.body_part_encoder)
+
+    def test_discriminator_loss_cannot_reach_the_generator(self):
+        method = make_method()
+        state = method.forward_state(make_batch(method.domain_specs))
+        losses = method.compute_discriminator_losses(state)
+        assert set(losses) == {"group_a/discriminator", "group_b/discriminator"}
+
+        grads = torch.autograd.grad(
+            sum(losses.values()), list(method.model.generator_parameters()), retain_graph=True, allow_unused=True
+        )
+        assert all(grad is None for grad in grads)
+
+    def test_replay_buffer_stores_discriminator_positions(self):
+        method = make_method()
+        batch = make_batch(method.domain_specs)
+        state = method.forward_state(batch)
+        method.compute_discriminator_losses(state)
+
+        stored = torch.cat(method.buffers["group_b"].items)
+        assert stored.shape == (BATCH_SIZE, WINDOW, 24, 3)
+        assert not stored.requires_grad
+        assert torch.equal(stored, state.pairs[("group_a", "group_b")].fake_bones.detach())
