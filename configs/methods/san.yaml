@@ -1,0 +1,184 @@
+device: cuda
+
+dataset:
+  group_a:
+    sources:
+      - amass
+    params:
+      sequence_length: 64
+      stride: 32
+      target_fps: 30
+      # max_samples:
+      # seed:
+
+  group_b:
+    sources:
+      - cmu
+    params:
+      sequence_length: 64
+      stride: 32
+      target_fps: 30
+      # max_samples:
+      # seed:
+
+method:
+  name: san
+
+  model:
+    motion_encoder:
+      block1:
+        conv_params:
+          in_channels_per_joint: 4
+          out_channels_per_joint: 8
+          offset_in_channels_per_joint: 3
+          bias: true
+          kernel_size: 15
+          stride: 2
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        pool_features: true
+        last_pool: false
+
+      block2:
+        conv_params:
+          in_channels_per_joint: 8
+          out_channels_per_joint: 16
+          offset_in_channels_per_joint: 6
+          bias: true
+          kernel_size: 15
+          stride: 2
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        pool_features: true
+        last_pool: true
+
+    offset_encoder:
+      block1:
+        conv_params:
+          in_channels_per_joint: 3
+          out_channels_per_joint: 6
+          bias: true
+          kernel_size: 1
+          stride: 1
+          padding: 0
+          padding_mode: constant
+          dilation: 1
+          groups: 1
+        pool_features: true
+        last_pool: false
+
+      block2:
+        conv_params:
+          in_channels_per_joint: 6
+          out_channels_per_joint: 12
+          bias: true
+          kernel_size: 1
+          stride: 1
+          padding: 0
+          padding_mode: constant
+          dilation: 1
+          groups: 1
+        pool_features: false
+        last_pool: false
+
+    motion_decoder:
+      block1:
+        channels_per_edge: 16
+        conv_params:
+          in_channels_per_joint: 16
+          out_channels_per_joint: 8
+          offset_in_channels_per_joint: 6
+          bias: true
+          kernel_size: 15
+          stride: 1
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        activation: true
+
+      block2:
+        channels_per_edge: 8
+        conv_params:
+          in_channels_per_joint: 8
+          out_channels_per_joint: 4
+          offset_in_channels_per_joint: 3
+          bias: true
+          kernel_size: 15
+          stride: 1
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        activation: false
+
+    motion_discriminator:
+      block1:
+        conv_params:
+          in_channels_per_joint: 3
+          out_channels_per_joint: 6
+          bias: false
+          kernel_size: 15
+          stride: 2
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        norm: true
+        activation: true
+
+      block2:
+        conv_params:
+          in_channels_per_joint: 6
+          out_channels_per_joint: 12
+          bias: true
+          kernel_size: 16
+          stride: 2
+          padding: 0
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        norm: false
+        activation: false
+
+  params:
+    # Discriminator replay buffer
+    replay_buffer_size: 50
+    swap_probability: 0.5
+
+    # Adam betas of both optimizers
+    betas: [0.09, 0.99]
+
+    # Loss weights (the root / joint position terms are also scaled by reconstruction_lambda)
+    reconstruction_lambda: 5.0
+    position_lambda: 100.0
+    root_position_lambda: 2.5
+    cycle_consistency_lambda: 2.5
+    end_effector_lambda: 1.0
+    adversarial_lambda: 50.0
+
+    # End-effector contacts: slower than the threshold (skeleton heights per frame)
+    contact_lambda: 100.0
+    contact_velocity_threshold: 0.008
+
+    # Log each loss term's gradient norm every N train steps (0 disables)
+    loss_grad_norm_interval: 50
+
+trainer:
+  batch_size: 256
+  learning_rate: 0.0002
+  num_epochs: 20000
+  val_fraction: 0.1
+  test_fraction: 0.0
+
+  log_interval: 10
+  validation_interval: 25
+  checkpoint_interval: 100
+
+  log_dir: logs
+  use_tensorboard: true
+  verbose: true

@@ -18,6 +18,7 @@ dependencies = [
     # has since drifted (dropped the `dtype` kwarg it expects) and is unmaintained.
     # The 1.0.0 git tag vendors its own lbs() and isn't affected.
     "human_body_prior @ git+https://github.com/nghorbani/human_body_prior.git@1.0.0",
+    "bvhio",
 ]
 
 [tool.setuptools.packages.find]

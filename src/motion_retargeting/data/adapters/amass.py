@@ -1,3 +1,12 @@
+"""
+Adapter for the AMASS dataset (SMPL-H `.npz` clips), via the `human_body_prior` BodyModel.
+
+Every AMASS clip shares the same joint topology but has its own betas, so each clip's
+MotionData carries its subject's offsets.
+"""
+
+from __future__ import annotations
+
 from typing import List
 
 import numpy as np

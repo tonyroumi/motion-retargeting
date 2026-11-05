@@ -1,108 +1,144 @@
-# """
-# Adapter for the BANDAI-Namco motion dataset, stored as BVH files.
-# """
+"""
+Adapter for the BANDAI-Namco motion dataset, stored as BVH files (Y-up, Z-forward,
+centimeters, one skeleton per clip with identical joint topology).
 
-# from .base import MotionSourceAdapter
+Two properties of the raw files need canonicalizing, so that the clips match the
+convention of the other adapters (joint 0 is the moving root, and an identity root
+rotation is an upright character):
+  - The BVH root `joint_Root` is a rotation-free ground anchor. It is dropped; `Hips`
+    becomes the root, with its world position as the root position.
+  - `Hips` is authored with its local X axis along the spine. That fixed rotation is
+    moved out of the root's rotation and into its children, which leaves every world
+    joint position unchanged.
+"""
 
-# from tqdm import tqdm
-# from typing import List, Optional, Tuple
-# import bvhio
-# import torch
+from __future__ import annotations
 
-# from motion_retargeting.data.representations.motion import Motion, Motions
-# from motion_retargeting.data.representations.skeleton import Skeleton
+import math
+from typing import List, Tuple
 
-# CENTIMETERS_TO_METERS = 0.01
+import torch
 
+from motion_retargeting.data.representations.motion import MotionData
+from motion_retargeting.kinematics.quaternions import quat_apply, quat_conjugate, quat_mul
 
-# class BANDAIAdapter(MotionSourceAdapter):
-#     UP_AXIS = "y"
-
-#     def __init__(self, cache: bool = True, device: str = "cpu"):
-#         super().__init__("bandai", device=device, file_extension="bvh")
-
-#         self._skeleton, motions = self.extract(cache=cache)
-#         self._motions = [Motions(motions, self._skeleton)]
-#         self.to_z_up()
-
-#     def extract(self, cache: bool) -> Tuple[Skeleton, List[Motion]]:
-#         if cache:
-#             cached = self.load_cache()
-#             if cached is not None:
-#                 return cached
-
-#         skeleton: Optional[Skeleton] = None
-#         motions: List[Motion] = []
-
-#         for bvh_file in tqdm(self.files, desc="Extracting Bandai Data"):
-#             data = bvhio.readAsBvh(bvh_file)
-
-#             # Every BANDAI clip shares one skeleton: build it from the first file.
-#             if skeleton is None:
-#                 skeleton = self.assign_joint_bodies(bvh_skeleton(data.Root, self.device))
-
-#             joints = [joint for joint, _, _ in data.Root.layout()]
-
-#             num_frames = data.FrameCount
-
-#             # BVH positions are in centimeters; convert to meters.
-#             root_positions = torch.as_tensor(
-#                 [list(pose.Position) for pose in joints[0].Keyframes],
-#                 dtype=torch.float32,
-#                 device=self.device,
-#             ) * CENTIMETERS_TO_METERS
-
-#             # bvhio quaternions iterate as (w, x, y, z), matching the convention
-#             # used by `motion_retargeting.kinematics`.
-#             local_rotations = torch.as_tensor(
-#                 [
-#                     [list(joint.Keyframes[t].Rotation) for joint in joints]
-#                     for t in range(num_frames)
-#                 ],
-#                 dtype=torch.float32,
-#                 device=self.device,
-#             )
-
-#             motion = Motion(
-#                 root_positions=root_positions,
-#                 # BVH root joint (joint_Root) rotation, matching root_positions.
-#                 root_rotations=local_rotations[:, 0].clone(),
-#                 local_rotations=local_rotations,
-#                 fps=1.0 / data.FrameTime,
-#                 metadata={"name": bvh_file.name},
-#             )
-
-#             motions.append(motion)
-
-#         if cache:
-#             self.save_cache(skeleton, motions)
-
-#         return skeleton, motions
+from .base import MotionSourceAdapter
+from .cmu import zforward_to_xforward_quaternion, zforward_to_xforward_vector
 
 
-# def bvh_skeleton(root, device: str) -> Skeleton:
-#     """ Skeleton (offsets in meters) from a bvhio root joint's hierarchy. """
-#     joint_names: List[str] = []
-#     parents: List[int] = []
-#     raw_offsets: List[list] = []
+CENTIMETERS_TO_METERS = 0.01
 
-#     def visit(joint, parent_idx: int) -> None:
-#         joint_names.append(joint.Name)
-#         parents.append(parent_idx)
-#         raw_offsets.append(list(joint.Offset))
+# Rotation of an upright `Hips` joint (+90 degrees about Z), in (w, x, y, z).
+HIPS_UPRIGHT = (math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4))
 
-#         my_idx = len(joint_names) - 1
-#         for child in joint.Children:
-#             visit(child, my_idx)
 
-#     visit(root, -1)
+class BANDAIAdapter(MotionSourceAdapter):
+    def __init__(
+        self,
+        device: str = "cpu",
+    ):
+        super().__init__("bandai", device=device)
 
-#     # BVH offsets are in centimeters; convert to meters.
-#     offsets = torch.as_tensor(raw_offsets, dtype=torch.float32, device=device) * CENTIMETERS_TO_METERS
-#     offsets[0] = torch.zeros(3, device=device)  # root has no parent offset
+    def _extract(self) -> List[MotionData]:
+        files = sorted(p for p in self.raw_dir.rglob("*.bvh"))
 
-#     return Skeleton(
-#         joint_names=joint_names,
-#         parents=torch.as_tensor(parents, dtype=torch.long, device=device),
-#         offsets=offsets,
-#     )
+        import bvhio
+        from tqdm import tqdm
+
+        motions: List[MotionData] = []
+
+        for bvh_file in tqdm(files, desc="Extracting BANDAI Data"):
+            data = bvhio.readAsBvh(str(bvh_file))
+
+            joints, parents = flatten_hierarchy(data.Root.Children[0])
+
+            offsets = rest_offsets(joints)
+
+            # bvhio quaternions iterate as (w, x, y, z).
+            joint_rotations = torch.as_tensor(
+                [[list(pose.Rotation) for pose in joint.Keyframes] for joint in joints],
+                dtype=torch.float32,
+            ).transpose(0, 1)  # [T, J, 4]
+
+            # `joint_Root` never rotates, so its translation adds directly to the `Hips` channels.
+            root_position = CENTIMETERS_TO_METERS * (
+                keyframe_positions(data.Root) + keyframe_positions(joints[0])
+            )
+
+            joint_rotations, offsets = uprighten_root(joint_rotations, offsets, parents)
+
+            joint_rotations[:, 0] = zforward_to_xforward_quaternion(joint_rotations[:, 0])
+
+            motion = self._construct_motion(
+                parents=parents,
+                offsets=offsets,
+                joint_rotations=joint_rotations,
+                root_position=zforward_to_xforward_vector(root_position),
+                fps=float(round(1.0 / data.FrameTime)),  # FrameTime is a rounded 0.0333333
+                joint_names=[joint.Name for joint in joints],
+            )
+
+            motions.append(motion)
+
+        return motions
+
+
+def flatten_hierarchy(root) -> Tuple[list, List[int]]:
+    """ The joints below (and including) a bvhio `root`, depth-first, with their parent indices. """
+    joints: list = []
+    parents: List[int] = []
+
+    def visit(joint, parent: int) -> None:
+        joints.append(joint)
+        parents.append(parent)
+
+        index = len(joints) - 1
+        for child in joint.Children:
+            visit(child, index)
+
+    visit(root, -1)
+
+    return joints, parents
+
+
+def rest_offsets(joints: list) -> torch.Tensor:
+    """ Parent-relative rest-pose offsets [J, 3] in meters (root offset zero). """
+    offsets = torch.as_tensor([list(joint.Offset) for joint in joints], dtype=torch.float32)
+    offsets[0] = 0.0
+    return offsets * CENTIMETERS_TO_METERS
+
+
+def keyframe_positions(joint) -> torch.Tensor:
+    """ A joint's position channels, [T, 3] in the file's centimeters. """
+    return torch.as_tensor([list(pose.Position) for pose in joint.Keyframes], dtype=torch.float32)
+
+
+def uprighten_root(
+    joint_rotations: torch.Tensor,
+    offsets: torch.Tensor,
+    parents: List[int],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Move the fixed `HIPS_UPRIGHT` rotation out of the root and into its children, so that an
+    identity root rotation is upright. World joint positions are unchanged:
+
+        q_root' = q_root * A^-1,  q_child' = A * q_child,  offset_child' = A * offset_child
+
+    joint_rotations: [T, J, 4]
+    offsets:         [J, 3]
+    """
+    joint_rotations = joint_rotations.clone()
+    offsets = offsets.clone()
+
+    upright = joint_rotations.new_tensor(HIPS_UPRIGHT)
+
+    joint_rotations[:, 0] = quat_mul(joint_rotations[:, 0], quat_conjugate(upright))
+
+    for joint, parent in enumerate(parents):
+        if parent != 0:
+            continue
+
+        joint_rotations[:, joint] = quat_mul(upright, joint_rotations[:, joint])
+        offsets[joint] = quat_apply(upright, offsets[joint])
+
+    return joint_rotations, offsets

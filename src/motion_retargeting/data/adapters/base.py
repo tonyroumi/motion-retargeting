@@ -2,6 +2,8 @@
 Abstract base class for processing different motion capture data sources
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -41,6 +43,10 @@ class MotionSourceAdapter(ABC):
             return torch.load(self.motion_cache_path, weights_only=False)
 
         motions = self._extract()
+        # Fail before caching: an empty cache would shadow the raw data once it is added.
+        if not motions:
+            raise FileNotFoundError(f"{self.dataset_name}: no motion clips found under {self.raw_dir}")
+
         data = MotionCollection(topology=self._topology, motions=motions)
         torch.save(data, self.motion_cache_path)
         return data

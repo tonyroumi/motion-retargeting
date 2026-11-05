@@ -6,7 +6,7 @@ This module provides adapters for loading and processing motion data from differ
 
 from .amass import AMASSAdapter
 from .cmu import CMUAdapter
-# from .bandai import BANDAIAdapter
+from .bandai import BANDAIAdapter
 from .base import MotionSourceAdapter
 
 __all__ = [

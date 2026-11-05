@@ -10,8 +10,17 @@ from motion_retargeting.data.dataset import compute_stats, split_dataset
 from motion_retargeting.data.factory import build_datasets
 from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
 from motion_retargeting.methods.pan.method import PANMethod
+from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
+from motion_retargeting.methods.san.method import SANMethod
 from motion_retargeting.training.trainer import Trainer, TrainerConfig
 from motion_retargeting.training.utils import ZippedLoaders
+
+
+# method name -> (domain spec, model config, method config, method) classes
+METHODS = {
+    "pan": (DomainSpec, PANModelConfig, PANConfig, PANMethod),
+    "san": (SANDomainSpec, SANModelConfig, SANConfig, SANMethod),
+}
 
 
 parser = argparse.ArgumentParser()
@@ -78,17 +87,19 @@ def main():
         for name, dataset in val_datasets.items()
     }
 
+    spec_cls, model_cfg_cls, method_cfg_cls, method_cls = METHODS[cfg["method"]["name"]]
+
     specs = {
-        name: DomainSpec.from_dataset(dataset)
+        name: spec_cls.from_dataset(dataset)
         for name, dataset in train_datasets.items()
     }
 
-    method = PANMethod(
-        model_cfg=PANModelConfig.from_dict(cfg["method"]["model"]),
+    method = method_cls(
+        model_cfg=model_cfg_cls.from_dict(cfg["method"]["model"]),
         domain_specs=specs,
         learning_rate=trainer_cfg["learning_rate"],
         device=device,
-        cfg=PANConfig(**cfg["method"].get("params", {})),
+        cfg=method_cfg_cls(**cfg["method"].get("params", {})),
     )
 
     trainer = Trainer(
