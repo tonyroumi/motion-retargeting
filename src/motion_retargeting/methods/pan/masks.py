@@ -5,8 +5,8 @@ from typing import Dict, List, Optional, Sequence
 import torch
 
 NUM_PARTS = 6
-# Additive attention weight of a blocked token pair, as in the official code.
-BLOCKED = -1e20
+# Additive attention weight of a blocked token pair: negative infinity, so it gets exactly zero attention.
+BLOCKED = float("-inf")
 
 
 def labeled_parts(body_joints: Optional[Dict[int, List[int]]], num_joints: int) -> List[List[int]]:
