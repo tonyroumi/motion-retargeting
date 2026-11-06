@@ -1,7 +1,2 @@
-from .motion_discriminator import (
-    MotionDiscriminator,
-    MotionDiscriminatorConfig,
-    ReferenceMotionDiscriminator,
-    ReferenceMotionDiscriminatorConfig,
-)
+from .motion_discriminator import MotionDiscriminator, MotionDiscriminatorConfig
 from .skeletal_discriminator import SkeletalDiscriminator, SkeletalDiscriminatorBlockConfig, SkeletalDiscriminatorConfig

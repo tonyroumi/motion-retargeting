@@ -1,87 +1,13 @@
 """
-Motion math shared by the data layer: the PAN attention mask, skeleton height, velocities,
-and heading (yaw) canonicalization. Quaternions are (w, x, y, z), Y is up.
+Motion math shared by the data layer: skeleton height, velocities, and heading (yaw)
+canonicalization. Quaternions are (w, x, y, z), Y is up.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
-
 import torch
 
 from motion_retargeting.kinematics.quaternions import quat_conjugate, quat_mul, quat_apply
-
-
-def build_joint_mask(
-    body_joints: Dict[int, List[int]],
-    device: torch.device | str | None = None,
-) -> torch.Tensor:
-    """
-    Build PAN attention mask for tokens ordered as:
-
-        [body_0, ..., body_B-1,
-         joint_0, ..., joint_J-1,
-         velocity]
-
-    Each body token and its associated joints attend within their body group.
-
-    The velocity token attends to every body token, and every body token
-    attends to the velocity token.
-
-    The velocity token does not attend directly to joint tokens.
-    """
-    num_bodies = len(body_joints)
-    num_joints = len([
-        joint
-        for joints in body_joints.values()
-        for joint in joints
-    ])
-
-    # +1 for the velocity token.
-    num_tokens = num_bodies + num_joints + 1
-
-    velocity_idx = num_tokens - 1
-
-    mask = torch.full(
-        (num_tokens, num_tokens),
-        float("-inf"),
-        device=device,
-    )
-
-    for body_idx, joints in body_joints.items():
-
-        # Original joint index -> token index after the body tokens.
-        joint_tokens = [
-            num_bodies + joint_idx
-            for joint_idx in joints
-        ]
-
-        # Body token + joints belonging to that body.
-        body_tokens = [body_idx] + joint_tokens
-
-        idx = torch.tensor(
-            body_tokens,
-            device=device,
-            dtype=torch.long,
-        )
-
-        # Allow attention within each body group.
-        mask[idx[:, None], idx[None, :]] = 0.0
-
-    # Allow velocity token <-> every body token.
-    body_idx = torch.arange(
-        num_bodies,
-        device=device,
-        dtype=torch.long,
-    )
-
-    mask[velocity_idx, body_idx] = 0.0
-    mask[body_idx, velocity_idx] = 0.0
-
-    # Allow velocity token to attend to itself.
-    mask[velocity_idx, velocity_idx] = 0.0
-
-    return mask
 
 
 def skeleton_height(

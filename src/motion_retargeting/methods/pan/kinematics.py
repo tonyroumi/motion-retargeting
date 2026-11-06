@@ -1,11 +1,11 @@
 """
-Edge forward kinematics of the PAN reference-Mixamo recipe.
+PAN's edge forward kinematics, following the official Mixamo path.
 
 Predicted edge rotations are applied independently: copies of a branching joint's rotation on its
 outgoing edges may differ, which is why this is not the generic joint `ForwardKinematics`. The bone
 ending at joint i is rotated by the accumulated transform including i's own edge rotation.
 
-Reference losses use three distinct position spaces, named here rather than folded into one "global
+The losses use three distinct position spaces, named here rather than folded into one "global
 positions" helper:
   - bone_vectors_with_absolute_root:  root entry absolute; every other entry its own bone vector
   - root_relative_with_absolute_root: root entry absolute; every other entry relative to the root
@@ -20,7 +20,7 @@ import torch
 
 from motion_retargeting.kinematics.quaternions import quat_apply, quat_mul, quat_normalize
 
-# The reference's scale on end-effector frame displacement.
+# The official code's scale on end-effector frame displacement.
 END_EFFECTOR_VELOCITY_SCALE = 10.0
 
 
@@ -76,8 +76,8 @@ def end_effector_velocity(world_positions: torch.Tensor, ee_ids: Sequence[int]) 
 
 def path_heights(offsets: torch.Tensor, parents: Sequence[int], chains: Sequence[Sequence[int]]) -> torch.Tensor:
     """
-    The reference's skeleton height per bank, [K, J, 3] -> [K]: bone lengths from the left foot tip to
-    the root plus from the head tip to the root. Neither a vertical extent nor legacy `rest_height`.
+    The official code's skeleton height per bank, [K, J, 3] -> [K]: bone lengths from the left foot tip to
+    the root plus from the head tip to the root. Not a vertical extent.
     """
     lengths = torch.linalg.vector_norm(offsets, dim=-1)  # [K, J]
     height = torch.zeros(offsets.shape[0], dtype=offsets.dtype, device=offsets.device)

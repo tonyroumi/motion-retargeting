@@ -1,5 +1,5 @@
 """
-Edge / absolute-root data view of the PAN reference recipe, on synthetic clips.
+PAN's edge / absolute-root data view, on synthetic clips.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from motion_retargeting.data.dataset import MotionDataset, compute_stats
 from motion_retargeting.data.representations.motion import MotionCollection, MotionData
 from motion_retargeting.data.representations.skeleton import SkeletonTopology
 from motion_retargeting.methods.pan.data import (
-    ReferenceDataConfig,
+    PANDataConfig,
     build_from_collections,
     resample_indices,
     split_holdout,
@@ -85,13 +85,13 @@ class TestResampling:
 class TestDataset:
     def test_window_count_matches_reference_arithmetic(self):
         for num_frames in (64, 65, 95, 96, 128, 200):
-            dataset = build_from_collections([collection(clip(num_frames=num_frames))], ReferenceDataConfig())
+            dataset = build_from_collections([collection(clip(num_frames=num_frames))], PANDataConfig())
             assert len(dataset) == num_frames // 32 - 1
 
     def test_too_short_clips_make_no_bank(self):
         dataset = build_from_collections(
             [collection(clip(offset_scale=2.0, num_frames=10), clip(num_frames=64))],
-            ReferenceDataConfig(),
+            PANDataConfig(),
         )
         assert dataset.num_banks == 1
         assert torch.equal(dataset.offsets[0], clip().offsets)
@@ -100,17 +100,17 @@ class TestDataset:
         almost_one = 1.0 + 1e-6
         dataset = build_from_collections(
             [collection(clip(1.0), clip(2.0), clip(1.0, seed=1), clip(almost_one))],
-            ReferenceDataConfig(),
+            PANDataConfig(),
         )
         assert dataset.num_banks == 3
         assert dataset.bank_ids.unique_consecutive().tolist() == [0, 1, 0, 2]
 
     def test_singleton_bank_is_legal(self):
-        dataset = build_from_collections([collection(clip())], ReferenceDataConfig())
+        dataset = build_from_collections([collection(clip())], PANDataConfig())
         assert dataset.num_banks == 1
 
     def test_normalize_denormalize_round_trip_on_all_channels(self):
-        dataset = build_from_collections([collection(clip(1.0), clip(2.0, seed=1))], ReferenceDataConfig())
+        dataset = build_from_collections([collection(clip(1.0), clip(2.0, seed=1))], PANDataConfig())
 
         for index in (0, len(dataset) - 1):
             item = dataset[index]
@@ -118,7 +118,7 @@ class TestDataset:
             denormalized = item["motion"] * dataset.std[bank] + dataset.mean[bank]
             assert torch.allclose(denormalized, dataset.motion[index], atol=1e-5)
 
-        # Rotation channels are normalized too, unlike the legacy final-row-only tensor.
+        # Rotation channels are normalized too, unlike the shared builder's final-row-only tensor.
         window = torch.stack([dataset[i]["motion"] for i in range(len(dataset)) if dataset.bank_ids[i] == 0])
         assert torch.allclose(window.mean(dim=(0, 1)), torch.zeros(15), atol=1e-4)
         assert torch.allclose(window.std(dim=(0, 1)), torch.ones(15), atol=1e-3)
@@ -126,13 +126,13 @@ class TestDataset:
     def test_constant_channels_stay_finite(self):
         data = clip()
         data.joint_rotations[...] = torch.tensor([1.0, 0.0, 0.0, 0.0])
-        dataset = build_from_collections([collection(data)], ReferenceDataConfig())
+        dataset = build_from_collections([collection(data)], PANDataConfig())
 
         assert (dataset.std[0, :12] == 1.0).all()
         assert torch.isfinite(dataset[0]["motion"]).all()
 
     def test_different_banks_use_different_statistics(self):
-        dataset = build_from_collections([collection(clip(1.0), clip(2.0, seed=1))], ReferenceDataConfig())
+        dataset = build_from_collections([collection(clip(1.0), clip(2.0, seed=1))], PANDataConfig())
         assert not torch.equal(dataset.mean[0], dataset.mean[1])
 
         index = (dataset.bank_ids == 1).nonzero()[0].item()
@@ -144,7 +144,7 @@ class TestHoldout:
     def make_dataset(self):
         return build_from_collections(
             [collection(clip(1.0, num_frames=1024), clip(2.0, num_frames=512, seed=1))],
-            ReferenceDataConfig(),
+            PANDataConfig(),
         )
 
     def test_split_is_95_5_in_order_per_bank(self):
@@ -180,12 +180,12 @@ class TestHoldout:
     def test_topology_mismatch_is_rejected(self):
         other = MotionCollection(topology=SkeletonTopology(parents=torch.tensor([-1, 0, 0, 0])), motions=[clip()])
         with pytest.raises(ValueError):
-            build_from_collections([collection(clip()), other], ReferenceDataConfig())
+            build_from_collections([collection(clip()), other], PANDataConfig())
 
 
-class TestLegacyPathUntouched:
-    def test_legacy_windows_keep_final_row_only_normalization(self, tmp_path, monkeypatch):
-        """ The legacy builder still produces the [W, J+1, 4] window, normalizing only its final row. """
+class TestSharedBuilderUntouched:
+    def test_shared_windows_keep_final_row_only_normalization(self, tmp_path, monkeypatch):
+        """ The shared builder, which SAN uses, still produces the [W, J+1, 4] window, normalizing only its final row. """
         from types import SimpleNamespace
 
         from motion_retargeting.data.adapters import MotionSourceAdapter, base
@@ -205,7 +205,7 @@ class TestLegacyPathUntouched:
                 )]
 
         builder = MotionDatasetBuilder(MotionDatasetBuilderConfig(sequence_length=64, stride=64))
-        dataset = builder.build([Adapter("legacy")])
+        dataset = builder.build([Adapter("shared")])
         assert isinstance(dataset, MotionDataset)
         assert dataset.motion.shape[1:] == (64, 5, 4)
 

@@ -1,6 +1,6 @@
 """
-PAN reference recipe's routes, objective and update order on synthetic domains, with reference scalar
-parity checks that run when PAN_REFERENCE_ROOT is set.
+PAN's routes, objective and update order on synthetic domains, with scalar parity checks against the
+official code that run when PAN_REFERENCE_ROOT is set.
 """
 
 from __future__ import annotations
@@ -22,25 +22,26 @@ import yaml
 from motion_retargeting.data.adapters import MotionSourceAdapter, base
 from motion_retargeting.data.representations.motion import MotionCollection, MotionData
 from motion_retargeting.data.representations.skeleton import SkeletonTopology
-from motion_retargeting.methods.pan.config import (
-    PANConfig,
-    PANModelConfig,
-    PANReferenceConfig,
-    PANReferenceDomainSpec,
-    PANReferenceModelConfig,
-)
-from motion_retargeting.methods.pan.losses import reference_end_effector_terms
-from motion_retargeting.methods.pan.method import PANMethod, PANReferenceMethod
+from motion_retargeting.methods.pan import config as pan_config
+from motion_retargeting.methods.pan import data as pan_data
+from motion_retargeting.methods.pan import losses as pan_losses
+from motion_retargeting.methods.pan import method as pan_method
+from motion_retargeting.methods.pan import model as pan_model
+from motion_retargeting.methods.pan import utils as pan_utils
+from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
+from motion_retargeting.methods.pan.losses import end_effector_terms
+from motion_retargeting.methods.pan.method import PANMethod
 from motion_retargeting.methods.pan.utils import mpjpe, squared_error_over_height2
+from motion_retargeting.methods.san.method import SANMethod
+from motion_retargeting.modules import decoders, discriminators, encoders
 from motion_retargeting.training.trainer import Trainer
 from pan_reference_support import ARGS, load_reference, requires_reference
 
 ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = ROOT / "scripts" / "train.py"
-REFERENCE_CONFIG = ROOT / "configs" / "methods" / "pan_reference.yaml"
-LEGACY_CONFIG = ROOT / "configs" / "methods" / "pan.yaml"
+PAN_CONFIG = ROOT / "configs" / "methods" / "pan.yaml"
 
-# The AMASS and CMU skeletons of configs/methods/pan_reference.yaml.
+# The AMASS and CMU skeletons of configs/methods/pan.yaml.
 AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
 CMU_PARENTS = [-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12, 13, 14, 11, 16, 17, 18, 11, 20, 21, 22]
 
@@ -50,7 +51,7 @@ NUM_BANKS = {"group_a": 3, "group_b": 2}
 PARENTS = {"group_a": AMASS_PARENTS, "group_b": CMU_PARENTS}
 
 
-def make_spec(parents, num_banks: int, generator: torch.Generator) -> PANReferenceDomainSpec:
+def make_spec(parents, num_banks: int, generator: torch.Generator) -> DomainSpec:
     num_joints = len(parents)
     channels = 4 * (num_joints - 1) + 3
 
@@ -63,7 +64,7 @@ def make_spec(parents, num_banks: int, generator: torch.Generator) -> PANReferen
     # Small enough that an untrained decoder's generated velocities include contact frames.
     std = 0.001 + 0.002 * torch.rand(num_banks, channels, generator=generator)
 
-    return PANReferenceDomainSpec(parents=torch.tensor(parents), offsets=offsets, mean=mean, std=std)
+    return DomainSpec(parents=torch.tensor(parents), offsets=offsets, mean=mean, std=std)
 
 
 def make_specs(seed: int = 0):
@@ -82,14 +83,14 @@ def make_batch(specs, batch_size: int = BATCH_SIZE, window: int = WINDOW, seed: 
     return batch
 
 
-def make_method(specs=None, seed: int = 0, **cfg) -> PANReferenceMethod:
+def make_method(specs=None, seed: int = 0, **cfg) -> PANMethod:
     torch.manual_seed(seed)
-    return PANReferenceMethod(
-        model_cfg=PANReferenceModelConfig(),
+    return PANMethod(
+        model_cfg=PANModelConfig(),
         domain_specs=specs if specs is not None else make_specs(),
         learning_rate=1e-3,
         device="cpu",
-        cfg=PANReferenceConfig(**cfg),
+        cfg=PANConfig(**cfg),
     )
 
 
@@ -291,9 +292,9 @@ class TestObjective:
         ("contact_lambda", "group_b_to_group_a/contact", 100),
     ])
     def test_factors(self, field, term, factor):
-        assert getattr(PANReferenceConfig(), field) == factor
+        assert getattr(PANConfig(), field) == factor
 
-        self.method.cfg = PANReferenceConfig(**{field: 2 * factor})
+        self.method.cfg = PANConfig(**{field: 2 * factor})
         changed = self.method.compute_generator_losses(self.state)
         assert changed[term].item() == pytest.approx(2 * self.losses[term].item(), rel=1e-5)
 
@@ -317,7 +318,7 @@ class TestObjective:
         fake[:, :, 0] = 0.001  # Generated contact, where the source is moving.
         fake[:, :, 1] = 1.0  # Generated motion, not selected.
 
-        transfer, contact = reference_end_effector_terms(source, fake, 0.008)
+        transfer, contact = end_effector_terms(source, fake, 0.008)
         assert contact.item() == pytest.approx((1 - 0.001) ** 2)
         assert transfer.item() == pytest.approx(((1 - 0.001) ** 2 + 0.0) / 2)
 
@@ -328,7 +329,7 @@ class TestObjective:
             mean, std = spec.mean.clone(), spec.std.clone()
             mean[:, -3:] *= 2
             std[:, -3:] *= 2
-            scaled[name] = PANReferenceDomainSpec(parents=spec.parents, offsets=2 * spec.offsets, mean=mean, std=std)
+            scaled[name] = DomainSpec(parents=spec.parents, offsets=2 * spec.offsets, mean=mean, std=std)
 
         original = make_method(specs)
         doubled = make_method(scaled)
@@ -349,7 +350,7 @@ class TestObjective:
             assert doubled_losses[term].item() == pytest.approx(original_losses[term].item(), rel=1e-3), term
 
     def test_empty_contact_selection_raises(self):
-        self.method.cfg = PANReferenceConfig(contact_threshold=0.0)
+        self.method.cfg = PANConfig(contact_threshold=0.0)
         with pytest.raises(RuntimeError, match="contact threshold"):
             self.method.compute_generator_losses(self.state)
 
@@ -555,7 +556,7 @@ class TestUpdateOrder:
         assert torch.equal(torch.cat(self.method.buffers["group_b"].items), recorded["fake"])
 
     def test_empty_contact_stops_before_either_optimizer_changes_parameters(self):
-        self.method.cfg = PANReferenceConfig(contact_threshold=0.0)
+        self.method.cfg = PANConfig(contact_threshold=0.0)
         generator_before, discriminator_before = snapshot(self.generator), snapshot(self.discriminator)
 
         with pytest.raises(RuntimeError, match="contact threshold"):
@@ -575,7 +576,7 @@ class TestUpdateOrder:
         assert unchanged(self.discriminator, discriminator_before)
 
     def test_diagnostics_are_finite(self):
-        self.method.cfg = PANReferenceConfig(loss_grad_norm_interval=1)
+        self.method.cfg = PANConfig(loss_grad_norm_interval=1)
         metrics = self.method.train_step(self.batch)
 
         assert torch.isfinite(torch.tensor(list(metrics.values()))).all()
@@ -632,9 +633,9 @@ class TestCheckpoints:
         path = tmp_path / "checkpoint.pt"
         torch.save(method.state_dict(), path)
         state = torch.load(path, weights_only=True)
-        assert state["recipe"]["reference_commit"].startswith("5a51d92")
-        assert state["recipe"]["physical_units"] == "metres"
-        assert state["recipe"]["domains"]["group_a"]["end_effector_ids"] == [10, 11, 15, 20, 21]
+        assert state["metadata"]["official_commit"].startswith("5a51d92")
+        assert state["metadata"]["physical_units"] == "metres"
+        assert state["metadata"]["domains"]["group_a"]["end_effector_ids"] == [10, 11, 15, 20, 21]
 
         restored = make_method(specs, seed=1)
         restored.eval()
@@ -657,17 +658,17 @@ class TestCheckpoints:
             reloaded.pairs[("group_a", "group_b")].fake_bones,
         )
 
-    def test_legacy_checkpoint_gets_a_clear_error(self):
+    def test_older_checkpoint_gets_a_clear_error(self):
         method = make_method()
-        legacy_state = {key: value for key, value in method.state_dict().items() if key != "recipe"}
-        with pytest.raises(ValueError, match="legacy PAN recipe"):
-            method.load_state_dict(legacy_state)
+        older_state = {key: value for key, value in method.state_dict().items() if key != "metadata"}
+        with pytest.raises(ValueError, match="predates this PAN implementation"):
+            method.load_state_dict(older_state)
 
     def test_incompatible_setup_is_rejected(self):
         method = make_method()
         state = copy.deepcopy(method.state_dict())
-        state["recipe"]["mask_recipe"] = "repaired_masks"
-        with pytest.raises(ValueError, match="mask_recipe"):
+        state["metadata"]["mask_version"] = "repaired_masks"
+        with pytest.raises(ValueError, match="mask_version"):
             method.load_state_dict(state)
 
         generator = torch.Generator().manual_seed(0)
@@ -677,29 +678,22 @@ class TestCheckpoints:
             make_method(other_banks).load_state_dict(method.state_dict())
 
 
-class TestRecipeConfig:
-    def test_legacy_is_the_default_and_unknown_recipes_are_rejected(self):
-        assert PANConfig().recipe == "legacy"
-        with pytest.raises(ValueError):
-            PANConfig(recipe="mixamo_reference ")
-        with pytest.raises(ValueError):
-            PANReferenceConfig(recipe="legacy")
-
+class TestConfig:
     def test_yaml_settings(self):
-        cfg = yaml.safe_load(REFERENCE_CONFIG.read_text())
-        assert cfg["method"]["params"]["recipe"] == "mixamo_reference"
+        cfg = yaml.safe_load(PAN_CONFIG.read_text())
         assert cfg["trainer"]["batch_size"] == 128
         assert cfg["trainer"]["learning_rate"] == 0.001
         assert cfg["trainer"]["num_epochs"] == 1001
+        assert "recipe" not in cfg["method"]["params"]
         assert "disc_logit_reg" not in cfg["method"]["params"]
         assert "grad_norm_clip" not in cfg["method"]["params"]
         for group in cfg["dataset"].values():
             assert group["params"]["sequence_length"] == 64
             assert group["params"]["stride"] == 32
 
-        PANReferenceConfig(**cfg["method"]["params"])
-        model_cfg = PANReferenceModelConfig.from_dict(cfg["method"]["model"])
-        assert model_cfg == PANReferenceModelConfig()
+        PANConfig(**cfg["method"]["params"])
+        model_cfg = PANModelConfig.from_dict(cfg["method"]["model"])
+        assert model_cfg == PANModelConfig()
 
     def test_adam_settings_have_no_schedule_or_decay(self):
         method = make_method()
@@ -708,8 +702,14 @@ class TestRecipeConfig:
             assert group["betas"] == (0.9, 0.999)
             assert group["weight_decay"] == 0
 
-    def test_legacy_yaml_has_no_recipe_key(self):
-        assert "recipe" not in yaml.safe_load(LEGACY_CONFIG.read_text())["method"]["params"]
+    def test_there_is_one_pan_implementation(self):
+        assert [path.name for path in PAN_CONFIG.parent.glob("pan*")] == ["pan.yaml"]
+        with pytest.raises(TypeError):
+            PANConfig(recipe="legacy")
+
+        modules = (pan_config, pan_data, pan_losses, pan_method, pan_model, pan_utils, decoders, discriminators, encoders)
+        names = [name for module in modules for name in vars(module)]
+        assert not [name for name in names if "reference" in name.lower() or "legacy" in name.lower()]
 
 
 def smooth_clip(num_joints: int, offset_scale: float, seed: int) -> MotionData:
@@ -755,7 +755,7 @@ def run_training(config: Path, monkeypatch) -> SimpleNamespace:
 
 
 class TestEndToEnd:
-    def test_reference_config_reaches_the_reference_branches(self, tmp_path, monkeypatch):
+    def test_pan_config_trains_and_checkpoints(self, tmp_path, monkeypatch):
         class Source:
             def __init__(self, name):
                 parents = {"amass": AMASS_PARENTS, "cmu": CMU_PARENTS}[name]
@@ -769,20 +769,21 @@ class TestEndToEnd:
 
         monkeypatch.setattr("motion_retargeting.methods.pan.data.build_adapter", Source)
 
-        run = run_training(write_config(REFERENCE_CONFIG, tmp_path), monkeypatch)
+        run = run_training(write_config(PAN_CONFIG, tmp_path), monkeypatch)
 
-        assert isinstance(run.method, PANReferenceMethod)
+        assert type(run.method) is PANMethod
         assert run.method.domain_specs["group_a"].num_banks == 2
 
         checkpoint = torch.load(run.trainer.checkpoint_dir / "final.pt", weights_only=True)
-        assert checkpoint["method"]["recipe"]["recipe"] == "mixamo_reference"
+        assert checkpoint["method"]["metadata"]["official_commit"] == pan_method.OFFICIAL_COMMIT
 
         gifs = list(run.trainer.visualization_dir.rglob("*.gif"))
         assert {gif.name for gif in gifs} == {"group_a_to_group_b.gif", "group_b_to_group_a.gif"}
 
         run.trainer.load_checkpoint(run.trainer.checkpoint_dir / "final.pt")
 
-    def test_existing_pan_config_still_runs_the_legacy_method(self, tmp_path, monkeypatch):
+    def test_san_config_still_uses_the_shared_windows(self, tmp_path, monkeypatch):
+        """ Only PAN reads its own data view: every other method keeps the shared builder's windows. """
         monkeypatch.setattr(base, "PATHS", SimpleNamespace(data_root=tmp_path))
         monkeypatch.setattr(base, "label_joint_bodies", lambda topology, offsets: {
             0: list(range(topology.num_joints // 2)),
@@ -809,8 +810,6 @@ class TestEndToEnd:
 
         monkeypatch.setattr("motion_retargeting.data.factory.build_adapter", Source)
 
-        run = run_training(write_config(LEGACY_CONFIG, tmp_path), monkeypatch)
+        run = run_training(write_config(ROOT / "configs" / "methods" / "san.yaml", tmp_path), monkeypatch)
 
-        assert type(run.method) is PANMethod
-        assert isinstance(run.method.model_cfg, PANModelConfig)
-        assert "recipe" not in torch.load(run.trainer.checkpoint_dir / "final.pt", weights_only=True)["method"]
+        assert type(run.method) is SANMethod
