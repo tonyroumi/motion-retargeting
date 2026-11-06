@@ -11,8 +11,8 @@ import pytest
 import torch
 import yaml
 
-from motion_retargeting.methods.san.config import SANModelConfig, SANReferenceDomainSpec
-from motion_retargeting.methods.san.model import SANReferenceDomain
+from motion_retargeting.methods.san.config import DomainSpec, SANModelConfig, SANReferenceDomainSpec
+from motion_retargeting.methods.san.model import SANDomain, SANReferenceDomain
 from motion_retargeting.methods.san.utils import select_banks
 from pan_reference_support import FIXTURE_23, FIXTURE_28, local_parents
 from san_reference_support import copy_reference_weights, load_reference, reference_edges, requires_reference
@@ -100,6 +100,58 @@ class TestKeptJointRowAccident:
         by_token = changed.reshape(-1, channels).any(dim=1)
         reading = [joint in neighbors for neighbors in conv.adj]
         assert by_token.tolist() == reading
+
+
+def token_biases(conv):
+    """ (token's bias slice, its own bound) per token of a convolution. """
+    channels = conv.out_channels_per_joint
+    kernel_size = conv.weight.shape[-1]
+    for token, neighbors in enumerate(conv.expanded_adj_list):
+        yield conv.bias[token * channels:(token + 1) * channels], 1 / len(neighbors) ** 0.5 / kernel_size ** 0.5
+
+
+class TestBiasInitialization:
+    def test_first_encoder_layer_draws_each_token_inside_its_own_bound(self):
+        conv = make_domain(AMASS_PARENTS).motion_encoder.block1.conv
+        whole_weight_bound = 1 / (conv.in_channels * conv.weight.shape[-1]) ** 0.5
+
+        for bias, bound in token_biases(conv):
+            assert bias.abs().max() <= bound
+
+        assert whole_weight_bound == pytest.approx(0.0275, abs=1e-4)
+        assert 1 / (32 * 15) ** 0.5 == pytest.approx(0.0456, abs=1e-4)
+        assert conv.bias.abs().max() > whole_weight_bound
+
+    @pytest.mark.parametrize("network", ["motion_encoder", "decoder"])
+    def test_every_generator_convolution_uses_per_token_bounds(self, network):
+        module = getattr(make_domain(CMU_PARENTS), network)
+        for block in (module.block1, module.block2):
+            for bias, bound in token_biases(block.conv):
+                assert bias.abs().max() <= bound
+
+    def test_discriminator_draws_per_token_and_keeps_its_bias_free_first_layer(self):
+        discriminator = make_domain(CMU_PARENTS).discriminator
+        assert discriminator.block1.conv.bias is None
+        for bias, bound in token_biases(discriminator.block2.conv):
+            assert bias.abs().max() <= bound
+
+    def test_static_path_keeps_the_whole_weight_bound_the_references_linear_layers_use(self):
+        conv = make_domain(CMU_PARENTS).offset_encoder.block1.conv
+        assert conv.bias.abs().max() <= 1 / (conv.in_channels * conv.weight.shape[-1]) ** 0.5
+
+    def test_legacy_domain_keeps_the_whole_weight_bound(self):
+        torch.manual_seed(0)
+        spec = DomainSpec(parents=torch.tensor(AMASS_PARENTS), num_joints=len(AMASS_PARENTS))
+        conv = SANDomain(SANModelConfig(), spec).motion_encoder.block1.conv
+        assert conv.bias.abs().max() <= 1 / (conv.in_channels * conv.weight.shape[-1]) ** 0.5
+
+    def test_loaded_checkpoints_keep_their_biases(self):
+        domain = make_domain(CMU_PARENTS)
+        restored = make_domain(CMU_PARENTS, seed=1)
+        assert not torch.equal(domain.motion_encoder.block1.conv.bias, restored.motion_encoder.block1.conv.bias)
+
+        restored.load_state_dict(domain.state_dict())
+        assert torch.equal(domain.motion_encoder.block1.conv.bias, restored.motion_encoder.block1.conv.bias)
 
 
 def structure_config() -> SANModelConfig:

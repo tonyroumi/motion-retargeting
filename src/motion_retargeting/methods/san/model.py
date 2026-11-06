@@ -14,7 +14,7 @@ from motion_retargeting.methods.pan.kinematics import EdgeForwardKinematics
 from motion_retargeting.modules.decoders import SkeletalDecoder
 from motion_retargeting.modules.discriminators import SkeletalDiscriminator
 from motion_retargeting.modules.encoders import SkeletalEncoder
-from motion_retargeting.modules.skeletal import construct_adj
+from motion_retargeting.modules.skeletal import SkeletalConv, construct_adj
 
 from .config import DomainSpec, SANModelConfig, SANReferenceDomainSpec
 from .utils import GeneratorOutputs, SANReferenceGeneratorOutputs, SANReferencePairOutputs, select_banks
@@ -197,6 +197,13 @@ class SANReferenceDomain(nn.Module):
             self.offset_encoder.pooling_hierarchy,
             **asdict(cfg.motion_discriminator),
         )
+
+        # The reference's convolutions draw biases per token. Its static encoder is linear, with the
+        # whole-weight fan-in that the offset encoder's kernel-1 convolutions already use.
+        for network in (self.motion_encoder, self.decoder, self.discriminator):
+            for module in network.modules():
+                if isinstance(module, SkeletalConv):
+                    module.init_bias_per_token()
 
     def encode_offsets(self) -> List[torch.Tensor]:
         """
