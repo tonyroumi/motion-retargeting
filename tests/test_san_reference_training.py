@@ -344,6 +344,125 @@ class TestObjective:
         assert method.buffers["group_a"].items[0].shape == (1, WINDOW, len(AMASS_PARENTS), 3)
 
 
+def snapshot(parameters) -> list:
+    return [parameter.detach().clone() for parameter in parameters]
+
+
+def changed(parameters, before) -> int:
+    return sum(not torch.equal(parameter, old) for parameter, old in zip(parameters, before))
+
+
+class TestUpdateOrder:
+    def test_optimizers_are_reference_adam(self):
+        method = make_method()
+        for optimizer in (method.generator_optimizer, method.discriminator_optimizer):
+            group = optimizer.param_groups[0]
+            assert (group["lr"], tuple(group["betas"])) == (2e-4, (0.9, 0.999))
+            assert (group["weight_decay"], group["amsgrad"]) == (0, False)
+
+    def test_each_step_changes_only_its_own_networks(self):
+        method = make_method()
+        method.train()
+        generator = list(method.model.generator_parameters())
+        discriminator = list(method.model.discriminator_parameters())
+        assert (len(generator), len(discriminator)) == (40, 18)
+
+        before = (snapshot(generator), snapshot(discriminator))
+        after_generator_step = {}
+        step = method.generator_optimizer.step
+
+        def spy():
+            step()
+            after_generator_step["generator"] = snapshot(generator)
+            after_generator_step["discriminator"] = snapshot(discriminator)
+            after_generator_step["discriminator_grads"] = [p.grad for p in discriminator]
+            after_generator_step["frozen"] = [p.requires_grad for p in discriminator]
+
+        with mock.patch.object(method.generator_optimizer, "step", side_effect=spy):
+            method.train_step(make_batch(method.domain_specs))
+
+        # The generator's 4 unchanged tensors are the static encoder's dead last layer, in both domains.
+        assert changed(after_generator_step["generator"], before[0]) == 36
+        assert changed(after_generator_step["discriminator"], before[1]) == 0
+        assert all(grad is None for grad in after_generator_step["discriminator_grads"])
+        assert not any(after_generator_step["frozen"])
+
+        assert changed(discriminator, after_generator_step["discriminator"]) == 18
+        assert changed(generator, after_generator_step["generator"]) == 0
+        assert all(parameter.requires_grad for parameter in discriminator)
+
+    def test_dead_static_layers_get_no_gradient(self):
+        method = make_method()
+        method.train_step(make_batch(method.domain_specs))
+        for domain in method.model.domains.values():
+            for parameter in domain.offset_encoder.block2.parameters():
+                assert parameter.grad is None
+
+    def test_one_generator_forward_per_step(self):
+        method = make_method()
+        with mock.patch.object(
+            method.model, "forward_generator", wraps=method.model.forward_generator
+        ) as forward_generator:
+            method.train_step(make_batch(method.domain_specs))
+        assert forward_generator.call_count == 1
+
+    def test_fakes_entering_the_buffers_keep_their_values_from_before_the_generator_step(self):
+        method = make_method()
+        forward_state = method.forward_state
+        captured = {}
+
+        def spy(batch):
+            state = forward_state(batch)
+            captured.update({
+                destination: pair.fake_bones.detach().clone()
+                for (source, destination), pair in state.pairs.items()
+                if source != destination
+            })
+            return state
+
+        entered = {}
+        for name, buffer in method.buffers.items():
+            query = buffer.query
+            buffer.query = lambda items, query=query, name=name: (entered.__setitem__(name, items.clone()), query(items))[1]
+
+        with mock.patch.object(method, "forward_state", side_effect=spy):
+            method.train_step(make_batch(method.domain_specs))
+
+        assert set(entered) == {"group_a", "group_b"}
+        for name, fake in entered.items():
+            assert torch.equal(fake, captured[name])
+            assert not fake.requires_grad
+
+    def test_empty_contact_selection_raises_before_either_optimizer_changes_a_parameter(self):
+        method = make_method(contact_threshold=0.0)
+        parameters = list(method.model.parameters())
+        before = snapshot(parameters)
+
+        with pytest.raises(RuntimeError, match="contact threshold"):
+            method.train_step(make_batch(method.domain_specs))
+
+        assert changed(parameters, before) == 0
+        assert all(buffer.num_items == 0 for buffer in method.buffers.values())
+
+    def test_metrics(self):
+        method = make_method(loss_grad_norm_interval=1)
+        metrics = method.train_step(make_batch(method.domain_specs))
+
+        for key in (
+            "total/generator",
+            "total/discriminator",
+            "group_a_to_group_b/contact_fraction",
+            "loss_grad/group_a/reconstruction",
+            "loss_grad/group_a/discriminator",
+            "grad/group_a/motion_encoder",
+            "grad/group_b/offset_encoder",
+            "grad/group_a/decoder",
+            "grad/group_b/discriminator",
+        ):
+            assert key in metrics, key
+        assert all(isinstance(value, float) and value == value for value in metrics.values())
+
+
 def reached(method: SANReferenceMethod, loss: torch.Tensor) -> set:
     """ The modules a loss term has a nonzero gradient on, named like the reference report's table. """
     modules = {}

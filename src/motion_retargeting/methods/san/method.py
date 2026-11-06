@@ -15,7 +15,7 @@ from motion_retargeting.kinematics import ForwardKinematics
 from motion_retargeting.methods.base import RetargetingMethod
 from motion_retargeting.methods.pan.kinematics import end_effector_velocity as scaled_end_effector_velocity
 from motion_retargeting.methods.pan.losses import reference_end_effector_terms
-from motion_retargeting.methods.pan.utils import ReferenceSourceState
+from motion_retargeting.methods.pan.utils import ReferenceSourceState, require_finite
 from motion_retargeting.resources.replay_buffer import ReplayBuffer
 
 from .config import DomainSpec, SANConfig, SANModelConfig, SANReferenceConfig, SANReferenceDomainSpec
@@ -417,6 +417,54 @@ class SANReferenceMethod(SANMethod):
         }
 
         self.num_steps = 0
+
+    def train_step(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> Dict[str, float]:
+        """
+        One generator forward, then in order:
+          - generator update, with discriminator parameters frozen; its adversarial gradient still
+            flows through them and FK
+          - discriminator update, on the fakes of that same forward (or their pool replacements)
+        Raises before stepping either optimizer if a route has no generated contact, or if the
+        generator's objective is not finite.
+        """
+        state = self.forward_state(batch)
+
+        interval = self.cfg.loss_grad_norm_interval
+        log_loss_grads = interval > 0 and self.num_steps % interval == 0
+        self.num_steps += 1
+
+        self.set_discriminator_requires_grad(False)
+        generator_losses = self.compute_generator_losses(state)
+        require_finite(generator_losses)
+        generator_loss, generator_info = total(generator_losses, "total/generator")
+        generator_info.update(self.contact_fractions(state))
+        if log_loss_grads:
+            generator_info.update(
+                self.loss_grad_norms(generator_losses, list(self.model.generator_parameters()))
+            )
+        self.generator_optimizer.zero_grad()
+        generator_loss.backward()
+        grad_info = self.grad_norms(("motion_encoder", "offset_encoder", "decoder"))
+        self.generator_optimizer.step()
+
+        self.set_discriminator_requires_grad(True)
+        discriminator_losses = self.compute_discriminator_losses(state)
+        require_finite(discriminator_losses)
+        discriminator_loss, discriminator_info = total(discriminator_losses, "total/discriminator")
+        if log_loss_grads:
+            discriminator_info.update(
+                self.loss_grad_norms(discriminator_losses, list(self.model.discriminator_parameters()))
+            )
+        self.discriminator_optimizer.zero_grad()
+        discriminator_loss.backward()
+        grad_info.update(self.grad_norms(("discriminator",)))
+        self.discriminator_optimizer.step()
+
+        return {**generator_info, **discriminator_info, **grad_info}
+
+    def set_discriminator_requires_grad(self, requires_grad: bool) -> None:
+        for parameter in self.model.discriminator_parameters():
+            parameter.requires_grad_(requires_grad)
 
     def forward_state(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> SANReferenceForwardState:
         """ One generator forward, with each route's FK on the bank that route's statistics belong to. """
