@@ -123,6 +123,8 @@ method:
         activation: false
 
     motion_discriminator:
+      # The reference trains these masks and pooling matrices by accident; kept on purpose (README).
+      train_structure: true
       block1:
         conv_params:
           in_channels_per_joint: 3

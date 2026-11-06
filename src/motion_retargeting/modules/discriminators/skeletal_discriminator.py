@@ -46,12 +46,15 @@ class SkeletalDiscriminatorConfig:
         norm=False,
         activation=False,
     ))
+    # Train each block's convolution mask and pooling matrix too, as the SAN reference does by accident.
+    train_structure: bool = False
 
     @classmethod
     def from_dict(cls, cfg: Dict[str, Any]) -> SkeletalDiscriminatorConfig:
         return cls(
             block1=SkeletalDiscriminatorBlockConfig.from_dict(cfg["block1"]),
             block2=SkeletalDiscriminatorBlockConfig.from_dict(cfg["block2"]),
+            train_structure=cfg.get("train_structure", False),
         )
 
 
@@ -85,6 +88,7 @@ class SkeletalDiscriminator(nn.Module):
         pooling_hierarchy: List[PoolingInfo],
         block1: Dict[str, Any],
         block2: Dict[str, Any],
+        train_structure: bool = False,
     ):
         super().__init__()
 
@@ -98,6 +102,13 @@ class SkeletalDiscriminator(nn.Module):
             pooling_hierarchy[1].edge_list,
             **block2,
         )
+
+        if train_structure:
+            for block in (self.block1, self.block2):
+                for module, name in ((block.conv, "mask"), (block.pool, "weight")):
+                    value = getattr(module, name)
+                    delattr(module, name)
+                    module.register_parameter(name, nn.Parameter(value))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ x: [B, T, rows * channels] -> realism in [0, 1], [B, pooled rows * channels, T_ds] """

@@ -5,14 +5,19 @@ SAN_REFERENCE_ROOT is set.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
+import yaml
 
 from motion_retargeting.methods.san.config import SANModelConfig, SANReferenceDomainSpec
 from motion_retargeting.methods.san.model import SANReferenceDomain
 from motion_retargeting.methods.san.utils import select_banks
 from pan_reference_support import FIXTURE_23, FIXTURE_28, local_parents
 from san_reference_support import copy_reference_weights, load_reference, reference_edges, requires_reference
+
+ROOT = Path(__file__).resolve().parents[1]
 
 AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
 CMU_PARENTS = [-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12, 13, 14, 11, 16, 17, 18, 11, 20, 21, 22]
@@ -95,6 +100,75 @@ class TestKeptJointRowAccident:
         by_token = changed.reshape(-1, channels).any(dim=1)
         reading = [joint in neighbors for neighbors in conv.adj]
         assert by_token.tolist() == reading
+
+
+def structure_config() -> SANModelConfig:
+    cfg = SANModelConfig()
+    cfg.motion_discriminator.train_structure = True
+    return cfg
+
+
+def discriminator_step(domain: SANReferenceDomain) -> None:
+    optimizer = torch.optim.Adam(domain.discriminator.parameters(), lr=2e-4)
+    bones = torch.randn(4, WINDOW, len(domain.fk.parents), 3)
+    optimizer.zero_grad()
+    domain.discriminate(bones).mean().backward()
+    optimizer.step()
+
+
+class TestTrainableDiscriminatorStructure:
+    def test_flag_comes_from_the_reference_yaml_only(self):
+        for name, expected in (("san_reference.yaml", True), ("san.yaml", False)):
+            cfg = yaml.safe_load((ROOT / "configs" / "methods" / name).read_text())
+            assert SANModelConfig.from_dict(cfg["method"]["model"]).motion_discriminator.train_structure is expected
+
+    def test_parameter_counts(self):
+        assert len(list(make_domain(CMU_PARENTS).discriminator.parameters())) == 5
+        assert len(list(make_domain(CMU_PARENTS, structure_config()).discriminator.parameters())) == 9
+
+    def test_structure_values_do_not_change_when_registered(self):
+        fixed = make_domain(CMU_PARENTS).discriminator
+        trained = make_domain(CMU_PARENTS, structure_config()).discriminator
+        for fixed_block, trained_block in ((fixed.block1, trained.block1), (fixed.block2, trained.block2)):
+            assert torch.equal(fixed_block.conv.mask, trained_block.conv.mask)
+            assert torch.equal(fixed_block.pool.weight, trained_block.pool.weight)
+
+    def test_one_step_fills_the_pools_keeps_mask_support_and_leaves_the_generator_alone(self):
+        domain = make_domain(CMU_PARENTS, structure_config())
+        discriminator = domain.discriminator
+        generator_structure = {
+            name: value.clone()
+            for name, value in domain.named_buffers()
+            if not name.startswith("discriminator.")
+        }
+        assert any(name.startswith("decoder.") and name.endswith(".mask") for name in generator_structure)
+        supports = {block: block.conv.mask.detach().clone() != 0 for block in (discriminator.block1, discriminator.block2)}
+        masks = {block: block.conv.mask.detach().clone() for block in supports}
+
+        discriminator_step(domain)
+
+        for block, support in supports.items():
+            assert (block.pool.weight != 0).all()
+            assert torch.equal(block.conv.mask != 0, support)
+            assert not torch.equal(block.conv.mask, masks[block])
+
+        for name, value in generator_structure.items():
+            assert torch.equal(domain.get_buffer(name), value)
+
+    def test_trained_structure_survives_a_checkpoint_round_trip(self):
+        domain = make_domain(CMU_PARENTS, structure_config())
+        discriminator_step(domain)
+
+        restored = make_domain(CMU_PARENTS, structure_config(), seed=1)
+        restored.load_state_dict(domain.state_dict())
+
+        for block, restored_block in ((domain.discriminator.block1, restored.discriminator.block1), (domain.discriminator.block2, restored.discriminator.block2)):
+            assert torch.equal(block.conv.mask, restored_block.conv.mask)
+            assert torch.equal(block.pool.weight, restored_block.pool.weight)
+
+    def test_without_the_flag_the_structure_is_not_in_the_state_dict(self):
+        state = make_domain(CMU_PARENTS).discriminator.state_dict()
+        assert "block1.pool.weight" not in state and "block1.conv.mask" not in state
 
 
 @requires_reference
