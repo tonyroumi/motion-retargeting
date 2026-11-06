@@ -1,6 +1,7 @@
 """
-PAN body-part masks: exact snapshots of pinned reference HEAD, its directional rules, and
-(with PAN_REFERENCE_ROOT set) a differential check against the reference's own mask code.
+PAN body-part masks from the topology's manually labeled body parts: exact snapshots of pinned
+reference HEAD, its directional rules, and (with PAN_REFERENCE_ROOT set) a differential check against
+the reference's own mask code.
 """
 
 from __future__ import annotations
@@ -15,39 +16,44 @@ from motion_retargeting.methods.pan.masks import (
     attention_mask,
     double_converted_parts,
     fresh_parts,
-    humanoid_chains,
+    labeled_parts,
     parts_to_parts,
     parts_to_tokens,
     skeleton_offset_mask,
     temporal_conv_mask,
     tokens_to_parts,
-    topology_chains,
 )
-from pan_reference_support import FIXTURE_23, FIXTURE_28, load_reference, local_parents, reference_edges, requires_reference
+from pan_reference_support import (
+    AMASS_BODY_JOINTS,
+    BODY_JOINTS_23,
+    BODY_JOINTS_28,
+    CMU_BODY_JOINTS,
+    FIXTURE_23,
+    FIXTURE_28,
+    labeled,
+    load_reference,
+    reference_edges,
+    requires_reference,
+)
 
-PARENTS_23 = local_parents(FIXTURE_23)
-PARENTS_28 = local_parents(FIXTURE_28)
+PARTS_23 = labeled(FIXTURE_23)
 
-# The AMASS and CMU skeletons of configs/methods/pan.yaml.
-AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
-CMU_PARENTS = [-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12, 13, 14, 11, 16, 17, 18, 11, 20, 21, 22]
-
-# Conv rows measured from reference HEAD, always-on root column included.
+# Conv rows of the labeled parts under the reference's double conversion, always-on root column included.
 DOUBLE_CONVERTED_23 = [
     [0, 1, 2, 22],
     [3, 4, 5, 6, 22],
     [7, 8, 9, 10, 22],
-    [10, 11, 12, 22],
-    [10, 13, 14, 15, 16, 22],
-    [10, 17, 18, 19, 20, 22],
+    [11, 12, 22],
+    [13, 14, 15, 16, 22],
+    [17, 18, 19, 20, 22],
 ]
 FRESH_23 = [
     [0, 1, 2, 3, 22],
     [4, 5, 6, 7, 22],
     [8, 9, 10, 11, 22],
-    [11, 12, 13, 22],
-    [11, 14, 15, 16, 17, 22],
-    [11, 18, 19, 20, 21, 22],
+    [12, 13, 22],
+    [14, 15, 16, 17, 22],
+    [18, 19, 20, 21, 22],
 ]
 
 
@@ -55,94 +61,77 @@ def rows(mask: torch.Tensor) -> list:
     return [row.nonzero().flatten().tolist() for row in mask]
 
 
-class TestChains:
-    def test_reference_order_on_the_23_joint_fixture(self):
-        assert topology_chains(PARENTS_23) == [
-            [0, 1, 2, 3, 4],
-            [0, 5, 6, 7, 8],
-            [0, 9, 10, 11, 12],
-            [12, 13, 14],
-            [12, 15, 16, 17, 18],
-            [12, 19, 20, 21, 22],
-        ]
+class TestLabeledParts:
+    def test_parts_are_the_labels_in_key_order(self):
+        assert labeled_parts(BODY_JOINTS_23, 23) == PARTS_23
+        assert labeled_parts(BODY_JOINTS_28, 28)[2] == [0, 11, 12, 13, 14]
 
-    def test_reference_order_on_the_28_joint_fixture(self):
-        chains = humanoid_chains(PARENTS_28)
-        assert chains[2] == [0, 11, 12, 13, 14]
-        assert chains[3] == [14, 15, 16, 17]
+        shuffled = {key: BODY_JOINTS_23[key] for key in (3, 4, 5, 2, 0, 1)}
+        assert labeled_parts(shuffled, 23) == PARTS_23
 
     def test_configured_sources_are_six_part_humanoids(self):
-        assert humanoid_chains(AMASS_PARENTS) == [
-            [0, 1, 4, 7, 10],
-            [0, 2, 5, 8, 11],
-            [0, 3, 6, 9],
-            [9, 12, 15],
-            [9, 13, 16, 18, 20],
-            [9, 14, 17, 19, 21],
-        ]
-        assert humanoid_chains(CMU_PARENTS) == [
-            [0, 1, 2, 3, 4],
-            [0, 5, 6, 7, 8],
-            [0, 9, 10, 11],
-            [11, 12, 13, 14, 15],
-            [11, 16, 17, 18, 19],
-            [11, 20, 21, 22, 23],
-        ]
+        assert labeled_parts(AMASS_BODY_JOINTS, 22) == list(AMASS_BODY_JOINTS.values())
+        assert labeled_parts(CMU_BODY_JOINTS, 24) == list(CMU_BODY_JOINTS.values())
 
-    @pytest.mark.parametrize("parents", [
-        [-1, 0, 1, 2],  # one chain
-        [-1, 0, 0, 1, 2],  # two chains
-        [-1, 0, 0, 0, 3, 3],  # five chains: a two-limbed upper body
-        [-1, 0, 0, 0, 0, 0, 0],  # six chains, all leaving the root
-        [-1, 0, 1, 1, 1, 0, 0, 6, 6],  # six chains with a branching first limb
-        [0, 0, 0, 0, 3, 3, 3],  # reference root convention, not the local one
+    def test_the_labels_do_not_come_from_the_skeleton_walk(self):
+        """ Arms and head are disjoint from the spine: a walk would repeat the spine's last joint in them. """
+        parts = labeled_parts(BODY_JOINTS_23, 23)
+        assert sorted(joint for part in parts for joint in part) == list(range(23))
+
+    @pytest.mark.parametrize("body_joints", [
+        None,
+        {},
+        {0: [0, 1, 2, 3]},  # one part
+        {key: BODY_JOINTS_23[key] for key in range(5)},  # five parts
+        {**BODY_JOINTS_23, 6: []},  # seven parts
+        {key + 1: part for key, part in BODY_JOINTS_23.items()},  # keys 1 to 6
+        {**BODY_JOINTS_23, 3: [13, 14, 15]},  # joint 15 in two parts
+        {**BODY_JOINTS_23, 3: [13]},  # joint 14 in no part
+        {**BODY_JOINTS_23, 2: BODY_JOINTS_23[2] + BODY_JOINTS_23[3], 3: []},  # an empty part
     ])
-    def test_arbitrary_topologies_are_rejected(self, parents):
+    def test_arbitrary_labels_are_rejected(self, body_joints):
         with pytest.raises(ValueError):
-            humanoid_chains(parents)
+            labeled_parts(body_joints, 23)
 
 
 class TestSnapshots:
-    def test_conv_rows_equal_reference_section_6(self):
-        chains = humanoid_chains(PARENTS_23)
-        assert rows(temporal_conv_mask(chains, 23)) == DOUBLE_CONVERTED_23
+    def test_conv_rows_are_the_double_converted_labels(self):
+        assert rows(temporal_conv_mask(PARTS_23, 23)) == DOUBLE_CONVERTED_23
 
     def test_skeleton_rows_are_a_single_conversion(self):
-        chains = humanoid_chains(PARENTS_23)
-        assert rows(skeleton_offset_mask(chains, 23)) == FRESH_23
+        assert rows(skeleton_offset_mask(PARTS_23, 23)) == FRESH_23
 
     def test_skeleton_mask_reads_the_last_joint_not_the_root(self):
-        mask = skeleton_offset_mask(humanoid_chains(PARENTS_23), 23)
+        mask = skeleton_offset_mask(PARTS_23, 23)
         assert mask[:, 22].all()
         assert mask[0, 0] and not mask[1:, 0].any()
 
     def test_caller_lists_are_not_mutated(self):
-        chains = humanoid_chains(PARENTS_23)
-        before = copy.deepcopy(chains)
-        fresh_parts(chains)
-        double_converted_parts(chains)
-        attention_mask(chains, 23)
-        temporal_conv_mask(chains, 23)
-        skeleton_offset_mask(chains, 23)
-        assert chains == before
+        parts = labeled(FIXTURE_23)
+        before = copy.deepcopy(parts)
+        fresh_parts(parts)
+        double_converted_parts(parts)
+        attention_mask(parts, 23)
+        temporal_conv_mask(parts, 23)
+        skeleton_offset_mask(parts, 23)
+        assert parts == before
 
 
 class TestSourceNumbering:
-    def test_cmu_depth_first_numbering_keeps_the_shift_within_a_chain(self):
-        rows_cmu = rows(temporal_conv_mask(humanoid_chains(CMU_PARENTS), 24))
+    def test_cmu_depth_first_numbering_keeps_the_shift_within_a_part(self):
+        rows_cmu = rows(temporal_conv_mask(labeled_parts(CMU_BODY_JOINTS, 24), 24))
         assert rows_cmu[0] == [0, 1, 2, 23]  # Left leg edges 0-3, shifted to 0-2.
 
     def test_amass_numbering_makes_the_reference_shift_cross_chains(self):
         """ Pins a known consequence of keeping ascending-child edges with the double conversion. """
-        rows_amass = rows(temporal_conv_mask(humanoid_chains(AMASS_PARENTS), 22))
+        rows_amass = rows(temporal_conv_mask(labeled_parts(AMASS_BODY_JOINTS, 22), 22))
         # The left leg's shortcut reads edges 2, 5, 8, whose children are spine joints 3, 6, 9.
         assert rows_amass[0] == [2, 5, 8, 21]
 
 
 class TestAttentionRules:
     def setup_method(self):
-        self.chains = humanoid_chains(PARENTS_23)
-        self.mask = attention_mask(self.chains, 23)
+        self.mask = attention_mask(PARTS_23, 23)
         self.allowed = self.mask == 0
         self.num_parts = 6
 
@@ -163,26 +152,29 @@ class TestAttentionRules:
         assert self.allowed[:, -1].all()
         assert self.allowed[-1].nonzero().flatten().tolist() == [28]
 
-    def test_shared_branch_token_relays_over_two_layers(self):
-        branch_edge = 6 + 11
+    def test_labeled_parts_share_no_token_so_nothing_relays_between_them(self):
         left_arm_edge = 6 + 14
         head_part = 3
-
-        # In one layer the head part cannot see the left arm, but the branch token can.
-        assert not self.allowed[head_part, left_arm_edge]
-        assert self.allowed[branch_edge, left_arm_edge]
-        assert self.allowed[head_part, branch_edge]
-
         two_layers = (self.allowed.float() @ self.allowed.float()) > 0
-        assert two_layers[head_part, left_arm_edge]
 
-        # Legs share no token with the upper body, so that relay does not reach them.
+        assert not self.allowed[head_part, left_arm_edge]
+        assert not two_layers[head_part, left_arm_edge]
         assert not two_layers[0, left_arm_edge]
+
+    def test_a_token_shared_by_several_parts_relays_over_two_layers(self):
+        """ The mask rule itself, on explicit parts that overlap: the two parts share edge 1. """
+        allowed = attention_mask([[0, 1, 2], [0, 2, 3]], 4) == 0
+        shared, only_second, first_part = 2 + 1, 2 + 2, 0
+
+        assert not allowed[first_part, only_second]
+        assert allowed[shared, only_second]
+        assert allowed[first_part, shared]
+        assert ((allowed.float() @ allowed.float()) > 0)[first_part, only_second]
 
 
 class TestConnectivity:
     def setup_method(self):
-        self.mask = temporal_conv_mask(humanoid_chains(PARENTS_23), 23)
+        self.mask = temporal_conv_mask(PARTS_23, 23)
 
     def test_tokens_to_parts(self):
         connectivity = tokens_to_parts(self.mask, 4, 32)
@@ -202,11 +194,17 @@ class TestConnectivity:
         # Edge 21 belongs to no part after the double conversion; it reads every part.
         assert connectivity[21 * 4:22 * 4].all()
 
-    def test_multiply_owned_outputs_read_every_owner(self):
+    def test_labeled_outputs_read_their_one_owner(self):
         connectivity = parts_to_tokens(self.mask, 32, 4)
-        # Edge 10 is shared by the spine, head and both arms.
+        # Edge 10 belongs to the spine alone.
         owners = connectivity[10 * 4, ::32].nonzero().flatten().tolist()
-        assert owners == [2, 3, 4, 5]
+        assert owners == [2]
+
+    def test_multiply_owned_outputs_read_every_owner(self):
+        connectivity = parts_to_tokens(temporal_conv_mask([[0, 1, 2], [0, 2, 3]], 4), 32, 4)
+        # Double converted, the parts are edges [0] and [0, 1]: edge 0 belongs to both.
+        owners = connectivity[0, ::32].nonzero().flatten().tolist()
+        assert owners == [0, 1]
 
     def test_root_token_reads_all_parts(self):
         assert parts_to_tokens(self.mask, 32, 4)[-1].all()
@@ -215,7 +213,7 @@ class TestConnectivity:
 class TestDevices:
     def test_masks_survive_a_module_round_trip(self):
         module = torch.nn.Module()
-        mask = temporal_conv_mask(humanoid_chains(PARENTS_23), 23)
+        mask = temporal_conv_mask(PARTS_23, 23)
         module.register_buffer("mask", mask.clone())
         module.to("cpu")
         assert torch.equal(module.mask, mask)
@@ -235,27 +233,23 @@ class TestAgainstReference:
         reference = load_reference()
         edges = reference_edges(reference, topology)
         num_tokens = len(topology)
-        chains = humanoid_chains(local_parents(topology))
-
-        parts = reference.getbodyparts(edges)
-        assert [list(part) for part in parts] == chains
+        parts = labeled(topology)
 
         # The encoder's two successive calls, in the same order, over the same lists.
         reference_attention = reference.calselfmask(parts, num_tokens, edges, is_conv=False)
         reference_conv = reference.calselfmask(parts, num_tokens, edges, is_conv=True)
-        reference_skeleton = reference.calselfmask(reference.getbodyparts(edges), num_tokens, edges, is_conv=True)
+        reference_skeleton = reference.calselfmask(labeled(topology), num_tokens, edges, is_conv=True)
 
-        assert torch.equal(attention_mask(chains, num_tokens), reference_attention)
-        assert torch.equal(temporal_conv_mask(chains, num_tokens), reference_conv.bool())
-        assert torch.equal(skeleton_offset_mask(chains, num_tokens), reference_skeleton.bool())
+        assert torch.equal(attention_mask(labeled(topology), num_tokens), reference_attention)
+        assert torch.equal(temporal_conv_mask(labeled(topology), num_tokens), reference_conv.bool())
+        assert torch.equal(skeleton_offset_mask(labeled(topology), num_tokens), reference_skeleton.bool())
 
     @pytest.mark.parametrize("topology", [FIXTURE_23, FIXTURE_28], ids=["23", "28"])
     def test_channel_connectivity_equals_reference_layers(self, topology):
         reference = load_reference()
         edges = reference_edges(reference, topology)
         num_tokens = len(topology)
-        chains = humanoid_chains(local_parents(topology))
-        conv = temporal_conv_mask(chains, num_tokens)
+        conv = temporal_conv_mask(labeled(topology), num_tokens)
         reference_mask = conv.float()
 
         shortcut = reference.BodyPartConv(6, reference_mask, num_tokens * 4, 192, 15, num_tokens, first_layer=True)

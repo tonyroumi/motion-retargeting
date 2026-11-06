@@ -63,9 +63,9 @@ class EdgeForwardKinematics:
         return torch.stack(positions, dim=-2)
 
 
-def end_effector_ids(chains: Sequence[Sequence[int]]) -> List[int]:
-    """ Chain endpoints, ordered left foot tip, right foot tip, head tip, left hand, right hand. """
-    return [chains[part][-1] for part in (0, 1, 3, 4, 5)]
+def end_effector_ids(parts: Sequence[Sequence[int]]) -> List[int]:
+    """ Part endpoints, ordered left foot tip, right foot tip, head tip, left hand, right hand. """
+    return [parts[part][-1] for part in (0, 1, 3, 4, 5)]
 
 
 def end_effector_velocity(world_positions: torch.Tensor, ee_ids: Sequence[int]) -> torch.Tensor:
@@ -74,14 +74,14 @@ def end_effector_velocity(world_positions: torch.Tensor, ee_ids: Sequence[int]) 
     return (end_effectors[:, 1:] - end_effectors[:, :-1]) * END_EFFECTOR_VELOCITY_SCALE
 
 
-def path_heights(offsets: torch.Tensor, parents: Sequence[int], chains: Sequence[Sequence[int]]) -> torch.Tensor:
+def path_heights(offsets: torch.Tensor, parents: Sequence[int], parts: Sequence[Sequence[int]]) -> torch.Tensor:
     """
     The official code's skeleton height per bank, [K, J, 3] -> [K]: bone lengths from the left foot tip to
     the root plus from the head tip to the root. Not a vertical extent.
     """
     lengths = torch.linalg.vector_norm(offsets, dim=-1)  # [K, J]
     height = torch.zeros(offsets.shape[0], dtype=offsets.dtype, device=offsets.device)
-    for end in (chains[0][-1], chains[3][-1]):
+    for end in (parts[0][-1], parts[3][-1]):
         joint = end
         while joint != 0:
             height = height + lengths[:, joint]

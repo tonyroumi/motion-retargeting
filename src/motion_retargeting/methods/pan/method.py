@@ -370,6 +370,7 @@ class PANMethod(RetargetingMethod):
             "domains": {
                 name: {
                     "parents": spec.parents.tolist(),
+                    "body_parts": spec.parts,
                     "num_skeleton_banks": spec.num_banks,
                     "end_effector_ids": spec.ee_ids,
                 }

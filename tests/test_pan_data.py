@@ -182,6 +182,23 @@ class TestHoldout:
         with pytest.raises(ValueError):
             build_from_collections([collection(clip()), other], PANDataConfig())
 
+    def test_labeled_body_parts_reach_the_dataset_and_its_splits(self):
+        body_joints = {0: [0, 1], 1: [2, 3]}
+        labeled_collection = MotionCollection(
+            topology=SkeletonTopology(parents=BRANCHING_PARENTS, body_joints=body_joints), motions=[clip()]
+        )
+        dataset = build_from_collections([labeled_collection], PANDataConfig())
+        train, holdout = split_holdout(dataset, 5)
+        assert dataset.body_joints == train.body_joints == holdout.body_joints == body_joints
+
+    def test_body_part_label_mismatch_is_rejected(self):
+        def labeled_as(body_joints):
+            topology = SkeletonTopology(parents=BRANCHING_PARENTS, body_joints=body_joints)
+            return MotionCollection(topology=topology, motions=[clip()])
+
+        with pytest.raises(ValueError, match="labeled body parts"):
+            build_from_collections([labeled_as({0: [0, 1], 1: [2, 3]}), labeled_as({0: [0, 2], 1: [1, 3]})], PANDataConfig())
+
 
 class TestSharedBuilder:
     def test_shared_windows_keep_final_row_only_normalization(self, tmp_path, monkeypatch):

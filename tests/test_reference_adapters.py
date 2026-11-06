@@ -29,7 +29,7 @@ from motion_retargeting.kinematics.forward import ForwardKinematics
 from motion_retargeting.kinematics.quaternions import quat_apply
 from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
 from motion_retargeting.methods.pan.data import build_splits
-from motion_retargeting.methods.pan.masks import humanoid_chains
+from motion_retargeting.methods.pan.masks import labeled_parts
 from motion_retargeting.methods.pan.method import PANMethod
 from motion_retargeting.methods.san import kinematics as san_kinematics
 from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
@@ -464,7 +464,7 @@ class TestBuilderRegression:
 
 
 class TestPAN:
-    """ PAN follows the official Mixamo path: the sources it can train on are the six-chain humanoids. """
+    """ PAN follows the official Mixamo path: the sources it can train on are labeled with six body parts. """
 
     def test_mixamo_trains_through_pan_yaml(self, isolated_data_root):
         for character, tree in (("Aj", mixamo_a_tree()), ("Malcolm_m", mixamo_b_tree())):
@@ -497,16 +497,23 @@ class TestPAN:
         assert math.isfinite(metrics["total/generator"])
         assert math.isfinite(metrics["total/discriminator"])
 
-    def test_lafan_is_accepted_and_the_dog_is_refused(self, isolated_data_root):
+    def test_mixamo_labels_are_accepted_and_the_three_part_lafan_dog_labels_are_refused(self, isolated_data_root):
+        for character, tree in (("Aj", mixamo_a_tree()), ("Malcolm_m", mixamo_b_tree())):
+            write_bvh(isolated_data_root / "raw" / "mixamo" / character / "clip.bvh", tree)
         write_bvh(isolated_data_root / "raw" / "lafan1" / "clip.bvh", lafan_tree())
         write_bvh(isolated_data_root / "raw" / "dog" / "clip.bvh", dog_tree())
 
-        with pytest.warns(UserWarning, match="train split"):
+        with pytest.warns(UserWarning):
+            mixamo_a, mixamo_b = MixamoAdapter().load(), MixamoGroupBAdapter().load()
             lafan, dog = LAFAN1Adapter().load(), DogAdapter().load()
 
-        assert len(humanoid_chains(lafan.topology.parents)) == 6
-        with pytest.raises(ValueError, match="body parts"):
-            humanoid_chains(dog.topology.parents)
+        for collection in (mixamo_a, mixamo_b):
+            topology = collection.topology
+            assert len(labeled_parts(topology.body_joints, topology.num_joints)) == 6
+        for collection in (lafan, dog):
+            topology = collection.topology
+            with pytest.raises(ValueError, match="body parts"):
+                labeled_parts(topology.body_joints, topology.num_joints)
 
 
 class TestSAN:

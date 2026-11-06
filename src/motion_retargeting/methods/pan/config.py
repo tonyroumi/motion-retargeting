@@ -14,7 +14,7 @@ from motion_retargeting.modules.discriminators import MotionDiscriminatorConfig
 from motion_retargeting.modules.encoders import MotionEncoderConfig
 
 from .kinematics import end_effector_ids, path_heights
-from .masks import humanoid_chains
+from .masks import labeled_parts
 
 if TYPE_CHECKING:
     from .data import PANMotionDataset
@@ -27,17 +27,18 @@ class DomainSpec:
     offsets: torch.Tensor  # [K, J, 3], metres
     mean: torch.Tensor     # [K, 4E + 3]
     std: torch.Tensor      # [K, 4E + 3]
+    body_joints: Dict[int, List[int]]  # the topology's manually labeled body parts
 
     def __post_init__(self):
-        humanoid_chains(self.parents)
+        labeled_parts(self.body_joints, self.num_joints)
 
     @property
-    def chains(self) -> List[List[int]]:
-        return humanoid_chains(self.parents)
+    def parts(self) -> List[List[int]]:
+        return labeled_parts(self.body_joints, self.num_joints)
 
     @property
     def num_parts(self) -> int:
-        return len(self.chains)
+        return len(self.parts)
 
     @property
     def num_joints(self) -> int:
@@ -54,16 +55,22 @@ class DomainSpec:
 
     @property
     def ee_ids(self) -> List[int]:
-        return end_effector_ids(self.chains)
+        return end_effector_ids(self.parts)
 
     @property
     def heights(self) -> torch.Tensor:
-        """ [K], from the validated chains' endpoints. """
-        return path_heights(self.offsets, self.parents.tolist(), self.chains)
+        """ [K], from the labeled parts' endpoints. """
+        return path_heights(self.offsets, self.parents.tolist(), self.parts)
 
     @classmethod
     def from_dataset(cls, dataset: PANMotionDataset) -> DomainSpec:
-        return cls(parents=dataset.parents, offsets=dataset.offsets, mean=dataset.mean, std=dataset.std)
+        return cls(
+            parents=dataset.parents,
+            offsets=dataset.offsets,
+            mean=dataset.mean,
+            std=dataset.std,
+            body_joints=dataset.body_joints,
+        )
 
 
 @dataclass
