@@ -1,12 +1,12 @@
 """
-Numerical body-part masks of the PAN reference-Mixamo recipe, at pinned reference HEAD.
+PAN's numerical body-part masks, following the official Mixamo path at its pinned commit.
 
 Token layout: edge i is the edge whose child is joint i + 1, and the final token is the root-position
 token, so a skeleton of J joints has J tokens (J - 1 edges + root). Attention prepends one token per
 part in front of those.
 
-Two reference quirks are reproduced on purpose. Neither is scientifically intended:
-  - Temporal conv masks are "double converted". The reference runs its joint -> edge conversion twice
+Two quirks of the official code are reproduced on purpose. Neither is scientifically intended:
+  - Temporal conv masks are "double converted". The official code runs its joint -> edge conversion twice
     on the same mutated lists, shifting every part after the first conversion by one more index.
   - Skeleton-encoder masks hold edge indices but select from a flattened *joint* offset tensor, and
     their always-on last column reads the last joint, not the root.
@@ -21,16 +21,16 @@ from typing import List, Sequence
 import torch
 
 # Identifies these masks in checkpoints; changing the numbers below must change this too.
-MASK_RECIPE = "reference_head_double_converted_v1"
+MASK_VERSION = "official_head_double_converted_v1"
 
 NUM_PARTS = 6
-# Additive attention weight of a blocked token pair, as in the reference.
+# Additive attention weight of a blocked token pair, as in the official code.
 BLOCKED = -1e20
 
 
 def topology_chains(parents: Sequence[int]) -> List[List[int]]:
     """
-    Joint chains in the reference's traversal order: depth-first from the root, children ascending,
+    Joint chains in the official code's traversal order: depth-first from the root, children ascending,
     starting a new chain at each branching non-root joint. Parents come before children.
     """
     parents = [int(parent) for parent in parents]
@@ -65,7 +65,7 @@ def humanoid_chains(parents: Sequence[int]) -> List[List[int]]:
 
     chains = topology_chains(parents)
     if len(chains) != NUM_PARTS:
-        raise ValueError(f"The reference recipe needs {NUM_PARTS} body parts, this topology has {len(chains)}: {chains}")
+        raise ValueError(f"PAN needs {NUM_PARTS} body parts, this topology has {len(chains)}: {chains}")
 
     leaves = set(range(len(parents))) - set(parents)
     left_leg, right_leg, spine, head, left_arm, right_arm = chains
@@ -84,7 +84,7 @@ def fresh_parts(chains: Sequence[Sequence[int]]) -> List[List[int]]:
 
 
 def double_converted_parts(chains: Sequence[Sequence[int]]) -> List[List[int]]:
-    """ The reference's second conversion, applied to `fresh_parts` as if they were joints. """
+    """ The official code's second conversion, applied to `fresh_parts` as if they were joints. """
     return fresh_parts(fresh_parts(chains))
 
 
@@ -143,7 +143,7 @@ def parts_to_parts(num_parts: int, in_per_part: int, out_per_part: int) -> torch
 def parts_to_tokens(mask: torch.Tensor, channels_per_part: int, channels_per_token: int) -> torch.Tensor:
     """
     Connectivity [tokens * out, P * in] of the final decoder layer. An output token owned by several
-    parts reads all of them; one owned by none reads everything (the reference's HEAD fallback for
+    parts reads all of them; one owned by none reads everything (the official code's fallback for
     fresh training, not the zero row its published checkpoints hold).
     """
     token_mask = mask.t()  # [tokens, P]

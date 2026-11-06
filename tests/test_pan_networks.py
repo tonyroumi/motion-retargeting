@@ -1,5 +1,5 @@
 """
-PAN reference networks: shapes and structure on synthetic topologies, and (with PAN_REFERENCE_ROOT set)
+PAN networks: shapes and structure on synthetic topologies, and (with PAN_REFERENCE_ROOT set)
 copied-weight output and gradient parity against the pinned reference modules.
 """
 
@@ -20,10 +20,10 @@ from motion_retargeting.methods.pan.masks import (
     temporal_conv_mask,
     tokens_to_parts,
 )
-from motion_retargeting.methods.pan.losses import reference_discriminator_loss, reference_generator_adversarial_loss
-from motion_retargeting.modules.decoders import ReferenceMotionDecoder
-from motion_retargeting.modules.discriminators import ReferenceMotionDiscriminator
-from motion_retargeting.modules.encoders import ReferenceBodyPartEncoder, ReferenceMotionEncoder, ReferenceMotionEncoderConfig
+from motion_retargeting.methods.pan.losses import discriminator_loss, generator_adversarial_loss
+from motion_retargeting.modules.decoders import MotionDecoder
+from motion_retargeting.modules.discriminators import MotionDiscriminator
+from motion_retargeting.modules.encoders import BodyPartEncoder, MotionEncoder, MotionEncoderConfig
 from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, load_reference, local_parents, on_cpu, reference_edges, requires_reference
 
 NUM_PARTS = 6
@@ -32,31 +32,31 @@ ATOL, RTOL = 1e-5, 1e-4
 FIXTURES = pytest.mark.parametrize("topology", [FIXTURE_23, FIXTURE_28], ids=["23", "28"])
 
 
-def make_encoder(topology=FIXTURE_23) -> ReferenceMotionEncoder:
+def make_encoder(topology=FIXTURE_23) -> MotionEncoder:
     num_tokens = len(topology)
     chains = humanoid_chains(local_parents(topology))
     conv = temporal_conv_mask(chains, num_tokens)
-    return ReferenceMotionEncoder(
+    return MotionEncoder(
         num_parts=NUM_PARTS,
         attention_mask=attention_mask(chains, num_tokens),
         shortcut_connectivity=tokens_to_parts(conv, 4, PART_DIM),
         part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
-        **asdict(ReferenceMotionEncoderConfig()),
+        **asdict(MotionEncoderConfig()),
     )
 
 
-def make_skeleton_encoder(topology=FIXTURE_23) -> ReferenceBodyPartEncoder:
+def make_skeleton_encoder(topology=FIXTURE_23) -> BodyPartEncoder:
     chains = humanoid_chains(local_parents(topology))
-    return ReferenceBodyPartEncoder(
+    return BodyPartEncoder(
         num_parts=NUM_PARTS,
         input_connectivity=tokens_to_parts(skeleton_offset_mask(chains, len(topology)), 3, PART_DIM),
         part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
     )
 
 
-def make_decoder(topology=FIXTURE_23) -> ReferenceMotionDecoder:
+def make_decoder(topology=FIXTURE_23) -> MotionDecoder:
     conv = temporal_conv_mask(humanoid_chains(local_parents(topology)), len(topology))
-    return ReferenceMotionDecoder(
+    return MotionDecoder(
         part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
         output_connectivity=parts_to_tokens(conv, PART_DIM, 4),
     )
@@ -149,19 +149,6 @@ class TestEncoder:
         assert read_by_left_leg[:12].sum() > 0
         assert read_by_left_leg[12:-3].sum() == 0
         assert read_by_left_leg[-3:].sum() > 0
-
-    def test_legacy_encoder_is_untouched(self):
-        from motion_retargeting.modules.encoders import MotionEncoder, MotionEncoderConfig
-
-        config = MotionEncoderConfig()
-        assert config.embed_dim == 64 and config.embed_hidden_dims == [256, 256]
-        assert not any(isinstance(module, nn.LayerNorm) for module in MotionEncoder(
-            input_dim=4,
-            num_bodies=1,
-            joint_body_mask=torch.zeros(4, 4),
-            **asdict(config),
-        ).modules())
-
 
 class _Zeros(nn.Module):
     def forward(self, sequence, mask=None):
@@ -355,30 +342,30 @@ class TestDecoderAgainstReference:
 
 class TestDiscriminator:
     def test_keeps_batch_and_patch_axes(self):
-        discriminator = ReferenceMotionDiscriminator(input_dim=69)
+        discriminator = MotionDiscriminator(input_dim=69)
         assert discriminator(torch.randn(2, 64, 23, 3)).shape == (2, 50)
         assert discriminator(torch.randn(1, 64, 23, 3)).shape == (1, 50)
 
     def test_layout(self):
-        discriminator = ReferenceMotionDiscriminator(input_dim=69)
+        discriminator = MotionDiscriminator(input_dim=69)
         assert [discriminator.conv1.kernel_size, discriminator.conv2.kernel_size, discriminator.conv3.kernel_size] == [(15,), (1,), (1,)]
         assert [discriminator.conv1.padding, discriminator.conv1.stride] == [(0,), (1,)]
         assert [discriminator.conv1.out_channels, discriminator.conv2.out_channels, discriminator.conv3.out_channels] == [256, 128, 1]
 
     def test_scores_are_probabilities(self):
-        scores = ReferenceMotionDiscriminator(input_dim=69)(100.0 * torch.randn(2, 64, 23, 3))
+        scores = MotionDiscriminator(input_dim=69)(100.0 * torch.randn(2, 64, 23, 3))
         assert ((scores >= 0) & (scores <= 1)).all()
 
 
 class TestGANLosses:
     def test_patch_errors_are_averaged_not_scores(self):
         # A mean score of 0.5 would give 0.25; averaging squared patch errors gives 0.5.
-        assert reference_generator_adversarial_loss(torch.tensor([[0.0, 1.0]])).item() == pytest.approx(0.5)
+        assert generator_adversarial_loss(torch.tensor([[0.0, 1.0]])).item() == pytest.approx(0.5)
 
     def test_discriminator_label_convention_and_half_factor(self):
         ones, zeros = torch.ones(2, 50), torch.zeros(2, 50)
-        assert reference_discriminator_loss(ones, zeros).item() == 0.0
-        assert reference_discriminator_loss(zeros, ones).item() == 1.0
+        assert discriminator_loss(ones, zeros).item() == 0.0
+        assert discriminator_loss(zeros, ones).item() == 1.0
 
 
 @requires_reference
@@ -388,7 +375,7 @@ class TestDiscriminatorAgainstReference:
         reference = load_reference()
         num_joints = len(topology)
         reference_discriminator = reference.LatentDiscriminator(3, 15, num_joints * 3, 256, is_lafan1=False)
-        discriminator = ReferenceMotionDiscriminator(input_dim=num_joints * 3)
+        discriminator = MotionDiscriminator(input_dim=num_joints * 3)
         copy_weights(reference_discriminator, discriminator, DISCRIMINATOR_LAYERS)
 
         positions = torch.randn(2, 64, num_joints, 3)

@@ -1,8 +1,9 @@
 # Training on the PAN authors' datasets
 
 These sources load the datasets of the [PAN reference implementation](https://github.com/hlcdyy/pan-motion-retargeting)
-into this repo's `MotionData`. The existing `MotionDatasetBuilder` then removes heading, resamples, and windows them.
-The datasets are not downloaded by this repo.
+into this repo's `MotionData`. PAN then builds its edge and absolute-root windows from them, and the shared
+`MotionDatasetBuilder` serves SAN by removing heading, resampling and windowing them. The datasets are not downloaded by
+this repo.
 
 ## Raw data
 
@@ -25,13 +26,20 @@ Paths are relative to the repo root. The `data/` directory is git-ignored.
 
 ## Training
 
-```bash
-python scripts/train.py --config configs/methods/pan_mixamo.yaml
-python scripts/train.py --config configs/methods/pan_lafan1_dog.yaml
+`configs/methods/pan.yaml` is the only PAN config. To train on Mixamo, point its groups at these sources:
+
+```yaml
+dataset:
+  group_a:
+    sources: [mixamo_a]
+  group_b:
+    sources: [mixamo_b]
 ```
 
-Both use this repo's PAN method, hyperparameters and 64-frame windows, with the reference's stride: 32 for Mixamo, 20 for
-LAFAN1/dog. The learning rate is this repo's 1e-4; the reference's published Mixamo run uses 1e-3.
+and keep the rest of the file. PAN follows the official Mixamo path, so it needs the six-chain humanoid topology
+(`humanoid_chains` in `methods/pan/masks.py`). `mixamo_a`, `mixamo_b` and `lafan1` have it. **The dog does not: its tail makes
+a seventh chain, so PAN refuses that skeleton with an error.** The official LAFAN1/dog path is a different computation and is
+not implemented here. The `lafan1` and `dog` loaders still load their clips, and both still go through the shared builder.
 
 ## What the adapters do
 
@@ -51,11 +59,12 @@ Afterwards both are +X forward, +Y up, +Z right, so both domains' canonical root
 both Mixamo groups share that frame. This could not be checked without real Mixamo clips. The adapters warn if a clip's
 root +X is mostly vertical.
 
-## Intentional differences from the reference
+## Differences from the reference, shared builder only
 
-This setup trains the reference's data on this repo's architecture, so its tensors do not match the reference's.
+PAN's windows follow the reference's Mixamo computation; see the README for what remains different. These differences apply
+only to windows from the shared `MotionDatasetBuilder`, which PAN does not use:
 
-| | Reference | This repo |
+| | Reference | Shared builder |
 |---|---|---|
 | Rotation groups, Mixamo | One per edge, holding the parent joint's rotation | One per joint |
 | Heading and root, Mixamo | Heading kept, absolute root position | Heading removed, velocity row |
@@ -82,9 +91,9 @@ No Mixamo clip is available here, so the Mixamo adapter is only tested on synthe
   group A cannot load until that approximation is added on purpose.
 
 The dog demo's header says 30 Hz and `dog_std.bvh` says 60 Hz. The reference halves every dog clip regardless, and its
-code comment says its dog data is 60 Hz, so the `target_fps: 30` config matches on the training clips if their headers say
+code comment says its dog data is 60 Hz, so `target_fps: 30` matches on the training clips if their headers say
 60 Hz. The demo clip stays at 30 Hz here, where the reference's demo would reduce it to 15 Hz.
 
-`skeleton_height` in `data/utils.py` and `rest_height` in `methods/pan/utils.py` measure the rest pose along an axis. They
-do not give a body height for LAFAN1 or the dog, whose identity pose is not standing. PAN's training losses do not use
-them.
+`skeleton_height` in `data/utils.py` measures the rest pose along an axis. It does not give a body height for LAFAN1 or the
+dog, whose identity pose is not standing. PAN's training losses do not use it; they use `path_heights` in
+`methods/pan/kinematics.py`.

@@ -5,16 +5,10 @@ Data layer tests on synthetic data: no raw datasets or body models needed.
 from __future__ import annotations
 
 import math
-from pathlib import Path
 from types import SimpleNamespace
-
-import matplotlib
-
-matplotlib.use("Agg")
 
 import pytest
 import torch
-import yaml
 
 from motion_retargeting.data.adapters import BANDAIAdapter, CMUAdapter, MotionSourceAdapter, base
 from motion_retargeting.data.adapters.amass import axis_angle_to_quaternion, zup_to_yup_quaternion, zup_to_yup_vector
@@ -22,14 +16,10 @@ from motion_retargeting.data.adapters.factory import ADAPTERS, build_adapter
 from motion_retargeting.data.builder import MotionDatasetBuilder, MotionDatasetBuilderConfig
 from motion_retargeting.data.dataset import MotionDataset, compute_stats, split_dataset
 from motion_retargeting.data.factory import build_datasets
-from motion_retargeting.data.utils import build_joint_mask, skeleton_height
+from motion_retargeting.data.utils import skeleton_height
 from motion_retargeting.kinematics.forward import ForwardKinematics
 from motion_retargeting.kinematics.quaternions import quat_apply
-from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
-from motion_retargeting.methods.pan.method import PANMethod
-from motion_retargeting.methods.pan.utils import restore_motion
-
-PAN_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "methods" / "pan.yaml"
+from motion_retargeting.methods.san.utils import restore_motion
 
 YAW_PER_FRAME = 0.01
 VELOCITY_PER_FRAME = (0.02, 0.0, 0.01)
@@ -291,7 +281,7 @@ class TestBuilder:
         assert torch.allclose(root, torch.tensor([1.0, 0.0, 0.0, 0.0]).expand_as(root), atol=1e-4)
 
     def test_frame_velocity_is_the_step_to_the_next_frame(self):
-        """ PAN rebuilds root positions as cumsum(v) - v, which relies on this alignment. """
+        """ SAN rebuilds root positions as cumsum(v) - v, which relies on this alignment. """
         clip = synthetic_clip(num_joints=4, num_frames=20)
         clip["joint_rotations"][:, 0] = torch.tensor([1.0, 0.0, 0.0, 0.0])
         clip["root_position"] = torch.arange(20.0)[:, None] ** 2 * torch.tensor([0.01, 0.0, 0.0])
@@ -400,56 +390,6 @@ class TestDataset:
 
 
 class TestUtils:
-    def test_joint_mask_groups_bodies(self):
-        mask = build_joint_mask({0: [0, 1], 1: [2]})
-
-        # Tokens: body_0, body_1, joint_0, joint_1, joint_2, velocity.
-        assert mask.shape == (6, 6)
-        assert mask[0, 2] == 0.0 and mask[2, 3] == 0.0
-        assert mask[0, 4] == float("-inf") and mask[2, 4] == float("-inf")
-        assert mask[5, 0] == 0.0 and mask[1, 5] == 0.0
-        assert mask[5, 2] == float("-inf")
-
     def test_skeleton_height(self):
         offsets = torch.tensor([[[0.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, -1.0, 0.0]]])
         assert skeleton_height(offsets, torch.tensor([-1, 0, 0])).item() == pytest.approx(1.5)
-
-
-class TestPANContract:
-    def test_domain_spec_and_training_steps(self, tmp_path):
-        """ A real PAN train / validation / visualize pass over two synthetic skeleton domains. """
-        batches = {}
-        specs = {}
-        for name, num_joints in (("group_a", 4), ("group_b", 6)):
-            dataset = build(sequence_length=64, stride=8, name=name, num_joints=num_joints)
-            dataset.set_normalization(*compute_stats(dataset))
-
-            specs[name] = DomainSpec.from_dataset(dataset)
-            assert specs[name].num_joints == num_joints
-            assert specs[name].motion_dim == (num_joints + 1) * 4
-            assert specs[name].num_bodies == 2
-            assert specs[name].root_body == 0
-
-            loader = torch.utils.data.DataLoader(dataset, batch_size=2)
-            batches[name] = next(iter(loader))
-
-        with PAN_CONFIG.open() as f:
-            method_cfg = yaml.safe_load(f)["method"]
-
-        method = PANMethod(
-            model_cfg=PANModelConfig.from_dict(method_cfg["model"]),
-            domain_specs=specs,
-            device="cpu",
-            cfg=PANConfig(**method_cfg["params"]),
-        )
-
-        train_metrics = method.train_step(batches)
-        assert math.isfinite(train_metrics["total/generator"])
-        assert math.isfinite(train_metrics["total/discriminator"])
-
-        validation_metrics = method.validation_step(batches)
-        assert math.isfinite(validation_metrics["group_a/val/reconstruction_mpjpe"])
-
-        method.visualize(batches, tmp_path, fps=30.0)
-        assert (tmp_path / "group_a_to_group_b.gif").exists()
-        assert (tmp_path / "group_b_to_group_a.gif").exists()

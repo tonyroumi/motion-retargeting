@@ -1,5 +1,5 @@
 """
-Reference-Mixamo body-part masks: exact snapshots of pinned reference HEAD, its directional rules, and
+PAN body-part masks: exact snapshots of pinned reference HEAD, its directional rules, and
 (with PAN_REFERENCE_ROOT set) a differential check against the reference's own mask code.
 """
 
@@ -28,7 +28,7 @@ from pan_reference_support import FIXTURE_23, FIXTURE_28, load_reference, local_
 PARENTS_23 = local_parents(FIXTURE_23)
 PARENTS_28 = local_parents(FIXTURE_28)
 
-# The AMASS and CMU skeletons of configs/methods/pan_reference.yaml.
+# The AMASS and CMU skeletons of configs/methods/pan.yaml.
 AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
 CMU_PARENTS = [-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12, 13, 14, 11, 16, 17, 18, 11, 20, 21, 22]
 

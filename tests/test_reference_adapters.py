@@ -1,5 +1,5 @@
 """
-Reference dataset adapters on synthetic BVHs, through the existing builder and PAN method.
+Reference dataset adapters on synthetic BVHs, through the shared builder and PAN's data view.
 
 Set PAN_REFERENCE_ROOT to a checkout of the PAN reference to also run on its demo clips.
 """
@@ -24,12 +24,14 @@ from scipy.spatial.transform import Rotation
 from motion_retargeting.data.adapters import DogAdapter, LAFAN1Adapter, MixamoAdapter, MixamoGroupBAdapter, base
 from motion_retargeting.data.adapters.factory import build_adapter
 from motion_retargeting.data.builder import MotionDatasetBuilder, MotionDatasetBuilderConfig
-from motion_retargeting.data.dataset import compute_stats
 from motion_retargeting.data.factory import build_datasets
 from motion_retargeting.kinematics.forward import ForwardKinematics
 from motion_retargeting.kinematics.quaternions import quat_apply
 from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
+from motion_retargeting.methods.pan.data import build_splits
+from motion_retargeting.methods.pan.masks import humanoid_chains
 from motion_retargeting.methods.pan.method import PANMethod
+from pan_reference_support import FIXTURE_23, FIXTURE_28
 
 pytest.importorskip("bvhio")
 
@@ -229,28 +231,6 @@ def windows_of(source, stride=20, target_fps=30):
     return MotionDatasetBuilder(config).build([source])
 
 
-def train_step(datasets, config_name):
-    """ One real PAN train step on these windows, with the config's model. """
-    specs, batches = {}, {}
-    for name, dataset in datasets.items():
-        dataset.set_normalization(*compute_stats(dataset))
-        specs[name] = DomainSpec.from_dataset(dataset)
-        batches[name] = next(iter(torch.utils.data.DataLoader(dataset, batch_size=2)))
-
-    with (CONFIGS / config_name).open() as f:
-        method_cfg = yaml.safe_load(f)["method"]
-
-    method = PANMethod(
-        model_cfg=PANModelConfig.from_dict(method_cfg["model"]),
-        domain_specs=specs,
-        device="cpu",
-        cfg=PANConfig(**method_cfg["params"]),
-    )
-    metrics = method.train_step(batches)
-    assert math.isfinite(metrics["total/generator"])
-    assert math.isfinite(metrics["total/discriminator"])
-
-
 class TestConversion:
     @pytest.mark.parametrize("order", ["Zrotation Yrotation Xrotation", "Zrotation Xrotation Yrotation"])
     def test_dog_matches_independent_fk(self, isolated_data_root, order):
@@ -448,49 +428,81 @@ class TestMixamo:
             MixamoAdapter().load()
 
 
-class TestBuilderRegression:
-    """ Loaded clips survive the existing builder as [N, 64, J + 1, 4] and train through PAN. """
+def group(source, stride):
+    return {"sources": [source], "params": {"sequence_length": 64, "stride": stride, "target_fps": 30}}
 
-    def test_mixamo_config(self, isolated_data_root):
+
+class TestBuilderRegression:
+    """ Loaded clips survive the shared builder as [N, 64, J + 1, 4]. """
+
+    def test_mixamo_windows(self, isolated_data_root):
         for character, tree in (("Aj", mixamo_a_tree()), ("Malcolm_m", mixamo_b_tree())):
             write_bvh(isolated_data_root / "raw" / "mixamo" / character / "clip.bvh", tree, num_frames=200)
 
-        with (CONFIGS / "pan_mixamo.yaml").open() as f:
-            cfg = yaml.safe_load(f)
         with pytest.warns(UserWarning, match="incomplete"):
-            datasets = build_datasets(cfg["dataset"])
+            datasets = build_datasets({"group_a": group("mixamo_a", 32), "group_b": group("mixamo_b", 32)})
 
         # (200 - 1 - 64) // 32 + 1 = 5 windows.
         assert datasets["group_a"].motion.shape == (5, 64, 24, 4)
         assert datasets["group_b"].motion.shape == (5, 64, 29, 4)
-        train_step(datasets, "pan_mixamo.yaml")
 
-    def test_lafan_dog_config(self, isolated_data_root):
+    def test_lafan_dog_windows(self, isolated_data_root):
         write_bvh(isolated_data_root / "raw" / "lafan1" / "clip.bvh", lafan_tree(), num_frames=200)
         write_bvh(isolated_data_root / "raw" / "dog" / "clip.bvh", dog_tree(), num_frames=200)
 
-        with (CONFIGS / "pan_lafan1_dog.yaml").open() as f:
-            cfg = yaml.safe_load(f)
         with pytest.warns(UserWarning):
-            datasets = build_datasets(cfg["dataset"])
+            datasets = build_datasets({"group_a": group("lafan1", 20), "group_b": group("dog", 20)})
 
         # (200 - 1 - 64) // 20 + 1 = 7 windows.
         assert datasets["group_a"].motion.shape == (7, 64, 23, 4)
         assert datasets["group_b"].motion.shape == (7, 64, 22, 4)
         assert sorted(datasets["group_a"].body_joints) == sorted(datasets["group_b"].body_joints)
-        train_step(datasets, "pan_lafan1_dog.yaml")
 
-    @pytest.mark.parametrize("config_name", ["pan_mixamo.yaml", "pan_lafan1_dog.yaml"])
-    def test_configs_keep_the_pan_model_and_window(self, config_name):
-        with (CONFIGS / config_name).open() as f:
-            cfg = yaml.safe_load(f)
+
+class TestPAN:
+    """ PAN follows the official Mixamo path: the sources it can train on are the six-chain humanoids. """
+
+    def test_mixamo_trains_through_pan_yaml(self, isolated_data_root):
+        for character, tree in (("Aj", mixamo_a_tree()), ("Malcolm_m", mixamo_b_tree())):
+            write_bvh(isolated_data_root / "raw" / "mixamo" / character / "clip.bvh", tree, num_frames=400)
+
         with (CONFIGS / "pan.yaml").open() as f:
-            pan = yaml.safe_load(f)
+            cfg = yaml.safe_load(f)
+        cfg["dataset"]["group_a"]["sources"] = ["mixamo_a"]
+        cfg["dataset"]["group_b"]["sources"] = ["mixamo_b"]
 
-        assert cfg["method"] == pan["method"]
-        assert cfg["trainer"] == pan["trainer"]
-        for group in cfg["dataset"].values():
-            assert group["params"]["sequence_length"] == pan["dataset"]["group_a"]["params"]["sequence_length"] == 64
+        with pytest.warns(UserWarning, match="incomplete"):
+            train_datasets, _ = build_splits(cfg["dataset"])
+
+        # An untrained decoder need not produce contact frames, so every frame is selected here.
+        params = {**cfg["method"]["params"], "contact_threshold": 1e6}
+        method = PANMethod(
+            model_cfg=PANModelConfig.from_dict(cfg["method"]["model"]),
+            domain_specs={name: DomainSpec.from_dataset(dataset) for name, dataset in train_datasets.items()},
+            device="cpu",
+            cfg=PANConfig(**params),
+        )
+
+        # The official masks are only right on the official joint order.
+        assert method.domain_specs["group_a"].parents.tolist() == [-1, *FIXTURE_23[1:]]
+        assert method.domain_specs["group_b"].parents.tolist() == [-1, *FIXTURE_28[1:]]
+        assert train_datasets["group_a"][0]["motion"].shape == (64, 4 * 22 + 3)
+
+        batches = {name: next(iter(torch.utils.data.DataLoader(dataset, batch_size=2))) for name, dataset in train_datasets.items()}
+        metrics = method.train_step(batches)
+        assert math.isfinite(metrics["total/generator"])
+        assert math.isfinite(metrics["total/discriminator"])
+
+    def test_lafan_is_accepted_and_the_dog_is_refused(self, isolated_data_root):
+        write_bvh(isolated_data_root / "raw" / "lafan1" / "clip.bvh", lafan_tree())
+        write_bvh(isolated_data_root / "raw" / "dog" / "clip.bvh", dog_tree())
+
+        with pytest.warns(UserWarning, match="train split"):
+            lafan, dog = LAFAN1Adapter().load(), DogAdapter().load()
+
+        assert len(humanoid_chains(lafan.topology.parents)) == 6
+        with pytest.raises(ValueError, match="body parts"):
+            humanoid_chains(dog.topology.parents)
 
 
 @pytest.mark.skipif(REFERENCE is None, reason="PAN_REFERENCE_ROOT is not set")
@@ -517,7 +529,6 @@ class TestReferenceDemoClips:
         # 391 and 494 frames: (T - 1 - 64) // 20 + 1 windows.
         assert human_windows.motion.shape == (17, 64, 23, 4)
         assert dog_windows.motion.shape == (22, 64, 22, 4)
-        train_step({"group_a": human_windows, "group_b": dog_windows}, "pan_lafan1_dog.yaml")
 
     def test_heading_axis_is_horizontal_and_root_is_upright(self, demo_sources):
         for source in demo_sources:

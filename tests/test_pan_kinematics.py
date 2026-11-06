@@ -1,5 +1,5 @@
 """
-Edge FK spaces of the PAN reference recipe, against closed-form fixtures and (with PAN_REFERENCE_ROOT
+PAN's edge FK spaces, against closed-form fixtures and (with PAN_REFERENCE_ROOT
 set) the pinned reference ForwardKinematics and get_ee.
 """
 
