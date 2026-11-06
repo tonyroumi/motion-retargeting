@@ -15,6 +15,14 @@ def build_edge_list(parents: Sequence[int]) -> List[List[int]]:
     return [[int(parent) + 1, joint + 1] for joint, parent in enumerate(parents)]
 
 
+def build_reference_edge_list(parents: Sequence[int]) -> List[List[int]]:
+    """
+    One (parent, child) edge per non-root joint, in child order, as the SAN reference builds it. Node
+    ids are joint ids and the root is node 0, so E edges plus the global row make J graph rows.
+    """
+    return [[int(parents[joint]), joint] for joint in range(1, len(parents))]
+
+
 def edge_distance_matrix(edge_list: Sequence[Sequence[int]]) -> List[List[float]]:
     """ (E, E) matrix of shortest edge-to-edge distances; edges sharing a joint are at distance 1. """
     num_edges = len(edge_list)

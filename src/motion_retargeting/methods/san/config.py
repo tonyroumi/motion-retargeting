@@ -14,7 +14,7 @@ from motion_retargeting.methods.pan.masks import humanoid_chains
 from motion_retargeting.modules.decoders import SkeletalDecoderConfig
 from motion_retargeting.modules.discriminators import SkeletalDiscriminatorConfig
 from motion_retargeting.modules.encoders import SkeletalEncoderBlockConfig, SkeletalEncoderConfig
-from motion_retargeting.modules.skeletal import SkeletalConvConfig, build_edge_list
+from motion_retargeting.modules.skeletal import SkeletalConvConfig, build_edge_list, build_reference_edge_list
 
 if TYPE_CHECKING:
     from motion_retargeting.data.dataset import FeatureStats, MotionDataset
@@ -112,6 +112,11 @@ class SANReferenceDomainSpec:
     def heights(self) -> torch.Tensor:
         """ [K], left foot tip to root plus head tip to root. """
         return path_heights(self.offsets, self.parents.tolist(), self.chains)
+
+    @property
+    def edge_list(self) -> List[List[int]]:
+        """ Graph row e is edge e, and the final row is the root-position token. """
+        return build_reference_edge_list(self.parents.tolist())
 
     @property
     def num_banks(self) -> int:
