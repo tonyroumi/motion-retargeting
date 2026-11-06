@@ -1,5 +1,0 @@
-defaults:
-  - autoencoder: default
-  - offset_encoder: default
-  - discriminator: default
-  - _self_
