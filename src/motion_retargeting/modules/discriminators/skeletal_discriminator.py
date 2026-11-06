@@ -99,6 +99,14 @@ class SkeletalDiscriminator(nn.Module):
             **block2,
         )
 
+        # Each block's convolution mask and pooling matrix are trained too, as the official SAN
+        # code does by accident. After one step both pooling matrices are fully dense.
+        for block in (self.block1, self.block2):
+            for module, name in ((block.conv, "mask"), (block.pool, "weight")):
+                value = getattr(module, name)
+                delattr(module, name)
+                module.register_parameter(name, nn.Parameter(value))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ x: [B, T, rows * channels] -> realism in [0, 1], [B, pooled rows * channels, T_ds] """
         return torch.sigmoid(self.block2(self.block1(x.transpose(1, 2))))

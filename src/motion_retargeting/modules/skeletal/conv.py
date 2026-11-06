@@ -2,6 +2,7 @@
 Skeletal-temporal convolution: each edge aggregates its neighbor edges over time.
 """
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -64,6 +65,21 @@ class SkeletalConv(SkeletalBase):
             self.offset_encoder = SkeletalLinear(self.adj, offset_in_channels_per_joint, self.out_channels)
 
         self.init_weights()
+
+    @torch.no_grad()
+    def init_bias_per_token(self) -> None:
+        """
+        Redraw each token's bias with the bound from its own neighbor slice, the official SAN fan-in,
+        rather than the whole weight's fan-in of `init_weights`.
+        """
+        if self.bias is None:
+            return
+
+        kernel_size = self.weight.shape[-1]
+        for edge, neighbors in enumerate(self.expanded_adj_list):
+            start = edge * self.out_channels_per_joint
+            bound = 1 / math.sqrt(len(neighbors) * kernel_size)
+            nn.init.uniform_(self.bias[start:start + self.out_channels_per_joint], -bound, bound)
 
     def forward(self, x: torch.Tensor, offset: Optional[torch.Tensor] = None) -> torch.Tensor:
         """

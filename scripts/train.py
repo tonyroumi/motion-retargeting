@@ -6,21 +6,20 @@ import yaml
 import torch
 from torch.utils.data import DataLoader, RandomSampler, Subset
 
-from motion_retargeting.data.dataset import compute_stats, split_dataset
-from motion_retargeting.data.factory import build_datasets
 from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
-from motion_retargeting.methods.pan.data import build_splits
+from motion_retargeting.methods.pan.data import build_splits as build_pan_splits
 from motion_retargeting.methods.pan.method import PANMethod
 from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
+from motion_retargeting.methods.san.data import build_san_splits
 from motion_retargeting.methods.san.method import SANMethod
 from motion_retargeting.training.trainer import Trainer, TrainerConfig
 from motion_retargeting.training.utils import ZippedLoaders
 
 
-# method name -> (domain spec, model config, method config, method) classes
+# method name -> (domain spec, model config, method config, method) classes, and its dataset splits
 METHODS = {
-    "pan": (DomainSpec, PANModelConfig, PANConfig, PANMethod),
-    "san": (SANDomainSpec, SANModelConfig, SANConfig, SANMethod),
+    "pan": (DomainSpec, PANModelConfig, PANConfig, PANMethod, build_pan_splits),
+    "san": (SANDomainSpec, SANModelConfig, SANConfig, SANMethod, build_san_splits),
 }
 
 
@@ -43,29 +42,10 @@ def main():
 
     trainer_cfg = cfg["trainer"]
 
-    if cfg["method"]["name"] == "pan":
-        # Built from the raw collections: the shared windows below have no absolute root or edges.
-        train_datasets, val_datasets = build_splits(cfg["dataset"])
-    else:
-        datasets = build_datasets(cfg["dataset"])
+    spec_cls, model_cfg_cls, method_cfg_cls, method_cls, build_splits = METHODS[cfg["method"]["name"]]
 
-        # Split every domain, then normalize all of its splits with stats from its train split only.
-        train_datasets, val_datasets, test_datasets = {}, {}, {}
-        for name, dataset in datasets.items():
-            train_dataset, val_dataset, test_dataset = split_dataset(
-                dataset,
-                val_fraction=trainer_cfg["val_fraction"],
-                test_fraction=trainer_cfg["test_fraction"],
-            )
-            vel_mean, vel_std, ang_mean, ang_std = compute_stats(train_dataset)
-
-            train_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
-            val_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
-            test_dataset.set_normalization(vel_mean, vel_std, ang_mean, ang_std)
-
-            train_datasets[name] = train_dataset
-            val_datasets[name] = val_dataset
-            test_datasets[name] = test_dataset
+    # Built from the raw collections: each method reads edge rotations and the absolute root.
+    train_datasets, val_datasets = build_splits(cfg["dataset"])
 
     # Draw the same number of samples from every domain each epoch (a fresh random subset
     # of the larger ones), so the zipped loaders always yield equally sized batches.
@@ -91,8 +71,6 @@ def main():
         )
         for name, dataset in val_datasets.items()
     }
-
-    spec_cls, model_cfg_cls, method_cfg_cls, method_cls = METHODS[cfg["method"]["name"]]
 
     specs = {
         name: spec_cls.from_dataset(dataset)

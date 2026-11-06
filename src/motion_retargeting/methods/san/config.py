@@ -14,60 +14,70 @@ from motion_retargeting.modules.discriminators import SkeletalDiscriminatorConfi
 from motion_retargeting.modules.encoders import SkeletalEncoderBlockConfig, SkeletalEncoderConfig
 from motion_retargeting.modules.skeletal import SkeletalConvConfig, build_edge_list
 
+from .kinematics import end_effector_ids, humanoid_chains, skeleton_height
+
 if TYPE_CHECKING:
-    from motion_retargeting.data.dataset import FeatureStats, MotionDataset
+    from .data import SANMotionDataset
 
 
 @dataclass(frozen=True)
 class DomainSpec:
-    """ Skeleton-dependent facts needed to size one domain's modules and run its kinematics. """
-    parents: torch.Tensor
-    num_joints: int  # J, excluding the appended global velocity row
+    """ One domain's topology and skeleton banks, validated on construction. """
+    parents: torch.Tensor  # [J], root first with parent -1
+    offsets: torch.Tensor  # [K, J, 3], metres
+    mean: torch.Tensor     # [K, 4E + 3]
+    std: torch.Tensor      # [K, 4E + 3]
 
-    vel_stats: FeatureStats | None = None
-    ang_vel_stats: FeatureStats | None = None
+    def __post_init__(self):
+        humanoid_chains(self.parents)
+
+    @property
+    def chains(self) -> List[List[int]]:
+        return humanoid_chains(self.parents)
 
     @property
     def edge_list(self) -> List[List[int]]:
-        """ Graph edge j is motion row j. Together with the global row, the graph has J + 1 rows. """
+        """ Graph row e is edge e, and the final row is the root-position token. """
         return build_edge_list(self.parents.tolist())
 
     @property
     def end_effectors(self) -> List[int]:
-        """ Leaf joints of the skeleton, in joint order. """
-        internal = set(self.parents.tolist())
-        return [joint for joint in range(self.num_joints) if joint not in internal]
+        """ Left foot tip, right foot tip, head tip, left hand, right hand. """
+        return end_effector_ids(self.chains)
+
+    @property
+    def heights(self) -> torch.Tensor:
+        """ [K], left foot tip to root plus head tip to root. """
+        return skeleton_height(self.offsets, self.parents.tolist(), self.chains)
+
+    @property
+    def num_banks(self) -> int:
+        return self.offsets.shape[0]
 
     @classmethod
-    def from_dataset(cls, dataset: MotionDataset) -> DomainSpec:
-        # offsets: [N, J, 3]
-        return cls(
-            parents=dataset.parents,
-            num_joints=dataset.offsets.shape[1],
-            vel_stats=dataset.vel_stats,
-            ang_vel_stats=dataset.ang_vel_stats,
-        )
+    def from_dataset(cls, dataset: SANMotionDataset) -> DomainSpec:
+        return cls(parents=dataset.parents, offsets=dataset.offsets, mean=dataset.mean, std=dataset.std)
 
 
 @dataclass
 class SANConfig:
-    # Discriminator replay buffer
+    # Discriminator replay buffer, holding bone-space positions
     replay_buffer_size: int = 50
     swap_probability: float = 0.5
 
     # Adam betas of both optimizers
-    betas: Tuple[float, float] = (0.09, 0.99)
+    betas: Tuple[float, float] = (0.9, 0.999)
 
     # Loss weights. The root / joint position terms are also scaled by the reconstruction weight.
     reconstruction_lambda: float = 5.0
     position_lambda: float = 100.0
     root_position_lambda: float = 2.5
     cycle_consistency_lambda: float = 2.5
-    end_effector_lambda: float = 1.0
-    adversarial_lambda: float = 50.0
+    end_effector_lambda: float = 50.0
+    adversarial_lambda: float = 1.0
 
-    # End-effector velocity loss: frames slower than the threshold (skeleton heights per frame)
-    # are treated as contacts, and weighted by contact_lambda on top of the base term.
+    # End-effector velocity loss: generated frames slower than the threshold (scaled skeleton heights
+    # per frame) are treated as contacts, and weighted by contact_lambda on top of the base term.
     contact_lambda: float = 100.0
     contact_velocity_threshold: float = 0.008
 

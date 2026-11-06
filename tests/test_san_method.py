@@ -4,7 +4,6 @@ SAN method smoke tests on synthetic domains, with no dataset (or data layer) inv
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 from unittest import SkipTest
 import importlib.util
 
@@ -12,7 +11,7 @@ import torch
 import yaml
 
 from motion_retargeting.methods.san.config import DomainSpec, SANConfig, SANModelConfig
-from motion_retargeting.methods.san.losses import end_effector_loss
+from motion_retargeting.methods.san.losses import end_effector_terms
 from motion_retargeting.methods.san.method import SANMethod
 from motion_retargeting.methods.san.model import SANModel
 from motion_retargeting.modules.skeletal import SkeletalConv, build_edge_list, construct_adj
@@ -25,31 +24,26 @@ CMU_PARENTS = [-1, 0, 1, 2, 3, 0, 5, 6, 7, 0, 9, 10, 11, 12, 13, 14, 11, 16, 17,
 
 BATCH_SIZE = 3
 WINDOW = 32
+NUM_BANKS = 2
 
 
 def make_spec(parents):
-    return DomainSpec(
-        parents=torch.tensor(parents),
-        num_joints=len(parents),
-        vel_stats=SimpleNamespace(mean=torch.tensor([0.0, 0.0, 0.01]), std=torch.tensor([0.02, 0.02, 0.03])),
-        ang_vel_stats=SimpleNamespace(mean=torch.tensor(0.0), std=torch.tensor(0.1)),
-    )
+    num_joints = len(parents)
+    channels = 4 * (num_joints - 1) + 3
+    offsets = 0.1 * torch.randn(NUM_BANKS, num_joints, 3)
+    offsets[:, 0] = 0.0
+    mean = torch.zeros(NUM_BANKS, channels)
+    mean[:, ::4] = 1.0
+    # Small enough that an untrained decoder's generated velocities include contact frames.
+    std = 0.001 + 0.002 * torch.rand(NUM_BANKS, channels)
+    return DomainSpec(parents=torch.tensor(parents), offsets=offsets, mean=mean, std=std)
 
 
 def make_domain_batch(num_joints):
-    """ The batch format of `MotionDataset` once collated: near-identity rotations and small offsets. """
-    rotations = torch.zeros(BATCH_SIZE, WINDOW, num_joints + 1, 4)
-    rotations[..., 0] = 1.0
-    q_heading = torch.zeros(BATCH_SIZE, WINDOW, 4)
-    q_heading[..., 0] = 1.0
-
-    offsets = 0.1 * torch.randn(BATCH_SIZE, num_joints, 3)
-    offsets[:, 0] = 0.0
-
+    """ The batch format of `SANMotionDataset` once collated. """
     return {
-        "motion": rotations + 0.05 * torch.randn_like(rotations),
-        "offsets": offsets,
-        "q_heading": q_heading,
+        "motion": torch.randn(BATCH_SIZE, WINDOW, 4 * (num_joints - 1) + 3),
+        "bank_id": torch.randint(NUM_BANKS, (BATCH_SIZE,)),
     }
 
 
@@ -72,15 +66,15 @@ def test_yaml_matches_default_model_config():
 
     assert cfg["method"]["name"] == "san"
     assert SANModelConfig.from_dict(cfg["method"]["model"]) == SANModelConfig()
-    assert SANConfig(**cfg["method"]["params"]).betas == [0.09, 0.99]
+    assert SANConfig(**cfg["method"]["params"]).betas == [0.9, 0.999]
 
 
 def test_motion_rows_map_to_graph_rows():
     edges = build_edge_list(AMASS_PARENTS)
 
-    assert edges[0] == [0, 1]  # the root's virtual edge
-    assert edges[4] == [2, 5]  # joint 4, child of joint 1
-    assert len(construct_adj(edges)) == len(AMASS_PARENTS) + 1
+    assert edges[0] == [0, 1]  # edge 0 ends at joint 1, and the root has no edge
+    assert edges[3] == [1, 4]  # joint 4, child of joint 1
+    assert len(construct_adj(edges)) == len(AMASS_PARENTS)  # E edges plus the root-position token
 
 
 def test_skeletal_conv_only_connects_neighbors():
@@ -88,10 +82,10 @@ def test_skeletal_conv_only_connects_neighbors():
     conv = SkeletalConv(adj, in_channels_per_joint=2, out_channels_per_joint=2, kernel_size=1, padding=0)
 
     x = torch.zeros(1, 2 * len(adj), 1, requires_grad=True)
-    conv(x)[0, 0].backward()  # First channel of the root edge
+    conv(x)[0, 0].backward()  # First channel of edge 0
 
     connected = x.grad[0, :, 0].abs().sum() > 0
-    far_edge = x.grad[0, 2 * 4:2 * 5, 0]  # Joint 4 is out of reach of the root edge
+    far_edge = x.grad[0, 2 * 3:2 * 4, 0]  # Edge 3 is out of reach of edge 0
     assert connected and far_edge.abs().sum() == 0
 
 
@@ -101,12 +95,12 @@ def test_generator_outputs_keep_the_batch_format():
 
     outputs = method.model.forward_generator(batch)
 
-    assert outputs.group_aa.shape == batch["group_a"]["motion"].shape
-    assert outputs.group_ba.shape == batch["group_a"]["motion"].shape
-    assert outputs.group_bb.shape == batch["group_b"]["motion"].shape
-    assert outputs.group_ab.shape == batch["group_b"]["motion"].shape
-    assert outputs.motion_code_a.shape == outputs.motion_code_b.shape
-    assert outputs.motion_code_a.shape[-1] == WINDOW // 4
+    for source, destination in (("group_a", "group_a"), ("group_b", "group_a"), ("group_a", "group_b"), ("group_b", "group_b")):
+        assert outputs.pairs[(source, destination)].fake.shape == batch[destination]["motion"].shape
+    for domain in ("group_a", "group_b"):
+        assert outputs.reconstructions[domain].shape == batch[domain]["motion"].shape
+    assert outputs.motion_codes["group_a"].shape == outputs.motion_codes["group_b"].shape
+    assert outputs.motion_codes["group_a"].shape[-1] == WINDOW // 4
 
 
 def test_train_step_updates_generators_and_discriminators():
@@ -121,18 +115,19 @@ def test_train_step_updates_generators_and_discriminators():
 
     metrics = method.train_step(make_batch())
 
-    for domain in ("group_a", "group_b"):
+    for domain, route in (("group_a", "group_a_to_group_b"), ("group_b", "group_b_to_group_a")):
         for term in (
-            "reconstruction",
-            "root_position",
-            "joint_position",
-            "latent_consistency",
-            "end_effector",
-            "adversarial",
-            "discriminator",
+            f"{domain}/reconstruction",
+            f"{domain}/root_position",
+            f"{domain}/joint_position",
+            f"{route}/latent_consistency",
+            f"{route}/end_effector",
+            f"{route}/contact",
+            f"{route}/adversarial",
+            f"{domain}/discriminator",
         ):
-            assert f"{domain}/{term}" in metrics
-            assert f"loss_grad/{domain}/{term}" in metrics
+            assert term in metrics
+            assert f"loss_grad/{term}" in metrics
 
         for component in ("motion_encoder", "offset_encoder", "decoder", "discriminator"):
             assert metrics[f"grad/{domain}/{component}"] > 0
@@ -160,11 +155,12 @@ def test_validation_step_leaves_parameters_alone():
 
     for domain in ("group_a", "group_b"):
         for name in (
-            "retarget_latent",
+            "retarget_latent_l1",
             "retarget_realism",
             "retarget_ee_velocity",
             "reconstruction_mse",
-            "reconstruction_mpjpe",
+            "reconstruction_mpjpe_m",
+            "reconstruction_squared_error_over_height2",
         ):
             assert isinstance(metrics[f"{domain}/val/{name}"], float)
 
@@ -172,29 +168,46 @@ def test_validation_step_leaves_parameters_alone():
         assert torch.equal(parameter, before[name])
 
 
-def test_end_effector_loss_handles_batches_without_contact():
-    predicted = torch.zeros(1, 2, 1, 3)
-    target = torch.ones(1, 2, 1, 3)
+def test_end_effector_terms_select_contacts_on_the_generated_velocity():
+    source = torch.ones(1, 2, 1, 3)
+    fake = torch.ones(1, 2, 1, 3)
 
-    assert end_effector_loss(predicted, target).item() == 1.0
+    # Half of the generated frames are slow. The contact term only sees those, whatever the source does.
+    fake[0, 0] = 0.0
+    transfer, contact = end_effector_terms(source, fake)
+    assert torch.isclose(transfer, ((fake - source) ** 2).mean())
+    assert torch.isclose(contact, torch.tensor(1.0))
 
-    # Half of the target frames are in contact: the extra term only sees those.
-    target[0, 0] = 0.0
-    predicted[0, 0] = 0.5
-    expected = ((predicted - target) ** 2).mean() + 100 * 0.25
-    assert torch.isclose(end_effector_loss(predicted, target), expected)
+
+def test_end_effector_terms_raise_without_a_generated_contact():
+    # The source is in contact and the generated motion is not: the official selection is empty.
+    try:
+        end_effector_terms(torch.zeros(1, 2, 1, 3), torch.ones(1, 2, 1, 3))
+    except RuntimeError as error:
+        assert "contact threshold" in str(error)
+    else:
+        raise AssertionError("Expected a RuntimeError for an empty contact selection")
 
 
 def test_incompatible_skeletons_are_rejected():
-    # A second spine chain: the primal skeleton gets one region more than AMASS'.
+    # A second spine chain: not the six body parts every domain's latent space relies on.
     extra_chain = AMASS_PARENTS + [0, 22]
 
     try:
-        SANModel(SANModelConfig(), {"group_a": make_spec(AMASS_PARENTS), "group_b": make_spec(extra_chain)})
+        make_spec(extra_chain)
     except ValueError as error:
-        assert "primal skeleton" in str(error)
+        assert "6 body parts" in str(error)
     else:
-        raise AssertionError("Expected a ValueError for incompatible skeletons")
+        raise AssertionError("Expected a ValueError for an incompatible skeleton")
+
+
+def test_exactly_two_domains_are_required():
+    try:
+        SANModel(SANModelConfig(), {"group_a": make_spec(AMASS_PARENTS)})
+    except ValueError as error:
+        assert "two domains" in str(error)
+    else:
+        raise AssertionError("Expected a ValueError for one domain")
 
 
 def test_runs_under_the_trainer_and_checkpoints_round_trip():

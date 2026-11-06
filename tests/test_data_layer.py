@@ -19,7 +19,6 @@ from motion_retargeting.data.factory import build_datasets
 from motion_retargeting.data.utils import skeleton_height
 from motion_retargeting.kinematics.forward import ForwardKinematics
 from motion_retargeting.kinematics.quaternions import quat_apply
-from motion_retargeting.methods.san.utils import restore_motion
 
 YAW_PER_FRAME = 0.01
 VELOCITY_PER_FRAME = (0.02, 0.0, 0.01)
@@ -271,9 +270,9 @@ class TestBuilder:
 
         assert torch.allclose(yaw_rate, torch.full_like(yaw_rate, YAW_PER_FRAME), atol=1e-5)
 
-        # Removing the heading is undone by `restore_motion`, recovering the world-frame velocity.
+        # Applying the removed heading again recovers the world-frame velocity.
         rotations = dataset.motion[..., :-1, :]
-        _, world_velocity = restore_motion(rotations, velocity, dataset.q_heading)
+        world_velocity = quat_apply(dataset.q_heading, velocity)
         assert torch.allclose(world_velocity, torch.tensor(VELOCITY_PER_FRAME).expand_as(world_velocity), atol=1e-4)
 
         # The root's rotation is entirely heading, so canonicalization leaves it at identity.
@@ -281,7 +280,7 @@ class TestBuilder:
         assert torch.allclose(root, torch.tensor([1.0, 0.0, 0.0, 0.0]).expand_as(root), atol=1e-4)
 
     def test_frame_velocity_is_the_step_to_the_next_frame(self):
-        """ SAN rebuilds root positions as cumsum(v) - v, which relies on this alignment. """
+        """ Root positions rebuild as cumsum(v) - v, which relies on this alignment. """
         clip = synthetic_clip(num_joints=4, num_frames=20)
         clip["joint_rotations"][:, 0] = torch.tensor([1.0, 0.0, 0.0, 0.0])
         clip["root_position"] = torch.arange(20.0)[:, None] ** 2 * torch.tensor([0.01, 0.0, 0.0])
