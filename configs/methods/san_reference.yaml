@@ -1,0 +1,187 @@
+# SAN reference recipe at DeepMotionEditing/deep-motion-editing 74fff8f, computed on the existing
+# AMASS / CMU sources. Selected by method.params.recipe; configs/methods/san.yaml stays the legacy recipe.
+#
+# Deviations from the original Mixamo assets (see README):
+#   - Skeleton banks: clips with exactly equal offsets stand in for Mixamo characters.
+#   - Statistics are fit per bank before the holdout, as the reference does, so the holdout is a
+#     reproduction diagnostic and not clean evidence of generalization.
+#   - Frames are resampled to target_fps on a timestamp grid, not with Mixamo's literal ::2.
+device: cuda
+
+dataset:
+  group_a:
+    sources:
+      - amass
+    params:
+      sequence_length: 64
+      stride: 32
+      target_fps: 30
+      holdout_percent: 5
+
+  group_b:
+    sources:
+      - cmu
+    params:
+      sequence_length: 64
+      stride: 32
+      target_fps: 30
+      holdout_percent: 5
+
+method:
+  name: san
+
+  model:
+    motion_encoder:
+      block1:
+        conv_params:
+          in_channels_per_joint: 4
+          out_channels_per_joint: 8
+          offset_in_channels_per_joint: 3
+          bias: true
+          kernel_size: 15
+          stride: 2
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        pool_features: true
+        last_pool: false
+
+      block2:
+        conv_params:
+          in_channels_per_joint: 8
+          out_channels_per_joint: 16
+          offset_in_channels_per_joint: 6
+          bias: true
+          kernel_size: 15
+          stride: 2
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        pool_features: true
+        last_pool: true
+
+    offset_encoder:
+      block1:
+        conv_params:
+          in_channels_per_joint: 3
+          out_channels_per_joint: 6
+          bias: true
+          kernel_size: 1
+          stride: 1
+          padding: 0
+          padding_mode: constant
+          dilation: 1
+          groups: 1
+        pool_features: true
+        last_pool: false
+
+      block2:
+        conv_params:
+          in_channels_per_joint: 6
+          out_channels_per_joint: 12
+          bias: true
+          kernel_size: 1
+          stride: 1
+          padding: 0
+          padding_mode: constant
+          dilation: 1
+          groups: 1
+        pool_features: false
+        last_pool: false
+
+    motion_decoder:
+      block1:
+        channels_per_edge: 16
+        conv_params:
+          in_channels_per_joint: 16
+          out_channels_per_joint: 8
+          offset_in_channels_per_joint: 6
+          bias: true
+          kernel_size: 15
+          stride: 1
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        activation: true
+
+      block2:
+        channels_per_edge: 8
+        conv_params:
+          in_channels_per_joint: 8
+          out_channels_per_joint: 4
+          offset_in_channels_per_joint: 3
+          bias: true
+          kernel_size: 15
+          stride: 1
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        activation: false
+
+    motion_discriminator:
+      block1:
+        conv_params:
+          in_channels_per_joint: 3
+          out_channels_per_joint: 6
+          bias: false
+          kernel_size: 15
+          stride: 2
+          padding: 7
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        norm: true
+        activation: true
+
+      block2:
+        conv_params:
+          in_channels_per_joint: 6
+          out_channels_per_joint: 12
+          bias: true
+          kernel_size: 16
+          stride: 2
+          padding: 0
+          padding_mode: reflect
+          dilation: 1
+          groups: 1
+        norm: false
+        activation: false
+
+  params:
+    recipe: mixamo_reference
+
+    replay_buffer_size: 50
+    swap_probability: 0.5
+
+    # Objective (README, "SAN recipes"): domain and pair aggregations are sums
+    reconstruction_lambda: 5
+    root_lambda: 1250
+    position_lambda: 500
+    latent_lambda: 2.5
+    end_effector_lambda: 50
+    contact_lambda: 100
+    contact_threshold: 0.008
+    adversarial_lambda: 1
+
+    # Log each loss term's gradient norm every N train steps (0 disables)
+    loss_grad_norm_interval: 50
+
+# Reference defaults: Adam(0.9, 0.999), no schedule, weight decay or gradient clipping.
+trainer:
+  batch_size: 256
+  learning_rate: 0.0002
+  # The reference's 160,008 steps at 104 steps per epoch (AMASS / CMU, batch 256). An epoch here is the
+  # smaller domain's train windows, so recompute this if the window count changes.
+  num_epochs: 1539
+
+  log_interval: 10
+  validation_interval: 25
+  checkpoint_interval: 100
+
+  log_dir: logs
+  use_tensorboard: true
+  verbose: true

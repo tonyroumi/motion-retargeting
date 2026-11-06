@@ -3,7 +3,7 @@ Edge / absolute-root data view of the PAN reference-Mixamo recipe.
 
 Built directly from the adapters' MotionCollections, before the shared window construction of
 `MotionDatasetBuilder` (whose windows have already discarded the absolute root and cannot express
-edge rotations). Legacy PAN and SAN never see this module.
+edge rotations). Legacy PAN and legacy SAN never see this module; SAN's reference recipe reads it too.
 
 Known deviations from the original Mixamo assets, on purpose:
   - Sources stay AMASS / CMU. Their clips are resampled on a timestamp grid (see
