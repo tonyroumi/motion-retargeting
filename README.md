@@ -70,6 +70,8 @@ The differential tests compare against the reference source, when it is availabl
 PAN_REFERENCE_ROOT=<reference checkout> pytest tests/test_pan_reference_*.py
 ```
 
+To train on the PAN authors' datasets (Mixamo, LAFAN1 and the dog), see [docs/author_datasets.md](docs/author_datasets.md).
+
 ## Acknowledgments
 
 This project builds on ideas and methods introduced in
