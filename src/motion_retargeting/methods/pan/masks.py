@@ -28,11 +28,6 @@ def fresh_parts(parts: Sequence[Sequence[int]]) -> List[List[int]]:
     return [[joint - 1 for joint in (part[1:] if part[0] == 0 else part)] for part in parts]
 
 
-def double_converted_parts(parts: Sequence[Sequence[int]]) -> List[List[int]]:
-    """ The official code's second conversion, applied to `fresh_parts` as if they were joints. """
-    return fresh_parts(fresh_parts(parts))
-
-
 def attention_mask(joint_parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
     """
     Additive mask [P + num_tokens, P + num_tokens], rows querying columns. A part token reads its own
@@ -66,8 +61,8 @@ def part_token_mask(parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Te
 
 
 def temporal_conv_mask(joint_parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
-    """ `part_token_mask` of the encoder shortcut and final decoder layer (double converted). """
-    return part_token_mask(double_converted_parts(joint_parts), num_tokens)
+    """ `part_token_mask` of the encoder shortcut and final decoder layer, from the labeled body parts. """
+    return part_token_mask(fresh_parts(joint_parts), num_tokens)
 
 
 def skeleton_offset_mask(joint_parts: Sequence[Sequence[int]], num_joints: int) -> torch.Tensor:

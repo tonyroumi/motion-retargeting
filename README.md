@@ -55,17 +55,17 @@ no such claim should be made without an actual matched evaluation. The remaining
 These are official-code behavior, reproduced for parity and not because they are scientifically intended.
 Repairing any of them would be a different experiment.
 
-- **Double-converted temporal masks.** The official code converts its parts to edge indices twice, shifting
-  the encoder shortcut and final decoder masks by one index. An edge left uncovered reads all parts. AMASS's
-  joint numbering is not depth-first, so on AMASS this shift crosses chains: the left leg's masks read spine
-  edges, for example.
 - **Skeleton offset masks.** Edge indices select from a flattened joint offset tensor, and the always-on
   last column reads the last joint, not the root.
 - **Contact selection.** Contacts are chosen on generated velocity below `0.008`. An empty selection is NaN
   in the official code; here training stops with an error before either optimizer steps, and no zero-contact
   variant is applied.
 
-The differential tests compare against the official source, when it is available:
+One intentional deviation: the temporal conv masks (encoder shortcut and final decoder layer) convert the
+manually labeled joint parts to edge indices once. The official code's second conversion, an artifact of mutating
+shared lists, is not reproduced.
+
+The differential tests compare the other masks and layers against the official source, when it is available:
 
 ```bash
 PAN_REFERENCE_ROOT=<official checkout> pytest tests/test_pan_*.py

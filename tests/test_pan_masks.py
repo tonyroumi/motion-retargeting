@@ -14,7 +14,6 @@ import torch
 from motion_retargeting.methods.pan.masks import (
     BLOCKED,
     attention_mask,
-    double_converted_parts,
     fresh_parts,
     labeled_parts,
     parts_to_parts,
@@ -38,15 +37,7 @@ from pan_reference_support import (
 
 PARTS_23 = labeled(FIXTURE_23)
 
-# Conv rows of the labeled parts under the reference's double conversion, always-on root column included.
-DOUBLE_CONVERTED_23 = [
-    [0, 1, 2, 22],
-    [3, 4, 5, 6, 22],
-    [7, 8, 9, 10, 22],
-    [11, 12, 22],
-    [13, 14, 15, 16, 22],
-    [17, 18, 19, 20, 22],
-]
+# Rows of the labeled parts as edge indices (one conversion), always-on root column included.
 FRESH_23 = [
     [0, 1, 2, 3, 22],
     [4, 5, 6, 7, 22],
@@ -95,8 +86,8 @@ class TestLabeledParts:
 
 
 class TestSnapshots:
-    def test_conv_rows_are_the_double_converted_labels(self):
-        assert rows(temporal_conv_mask(PARTS_23, 23)) == DOUBLE_CONVERTED_23
+    def test_conv_rows_are_a_single_conversion(self):
+        assert rows(temporal_conv_mask(PARTS_23, 23)) == FRESH_23
 
     def test_skeleton_rows_are_a_single_conversion(self):
         assert rows(skeleton_offset_mask(PARTS_23, 23)) == FRESH_23
@@ -110,7 +101,6 @@ class TestSnapshots:
         parts = labeled(FIXTURE_23)
         before = copy.deepcopy(parts)
         fresh_parts(parts)
-        double_converted_parts(parts)
         attention_mask(parts, 23)
         temporal_conv_mask(parts, 23)
         skeleton_offset_mask(parts, 23)
@@ -118,15 +108,14 @@ class TestSnapshots:
 
 
 class TestSourceNumbering:
-    def test_cmu_depth_first_numbering_keeps_the_shift_within_a_part(self):
+    def test_cmu_depth_first_numbering_gives_contiguous_edges(self):
         rows_cmu = rows(temporal_conv_mask(labeled_parts(CMU_BODY_JOINTS, 24), 24))
-        assert rows_cmu[0] == [0, 1, 2, 23]  # Left leg edges 0-3, shifted to 0-2.
+        assert rows_cmu[0] == [0, 1, 2, 3, 23]  # Left leg joints 1-4, edges 0-3.
 
-    def test_amass_numbering_makes_the_reference_shift_cross_chains(self):
-        """ Pins a known consequence of keeping ascending-child edges with the double conversion. """
+    def test_amass_numbering_keeps_each_part_on_its_own_chain(self):
         rows_amass = rows(temporal_conv_mask(labeled_parts(AMASS_BODY_JOINTS, 22), 22))
-        # The left leg's shortcut reads edges 2, 5, 8, whose children are spine joints 3, 6, 9.
-        assert rows_amass[0] == [2, 5, 8, 21]
+        # The left leg's joints 1, 4, 7, 10 own edges 0, 3, 6, 9: no spine edge is read.
+        assert rows_amass[0] == [0, 3, 6, 9, 21]
 
 
 class TestAttentionRules:
@@ -180,19 +169,21 @@ class TestConnectivity:
         connectivity = tokens_to_parts(self.mask, 4, 32)
         assert connectivity.shape == (192, 92)
         assert connectivity[0, 0] and connectivity[31, 3] and connectivity[0, 91]
-        assert not connectivity[0, 3 * 4]
-        assert connectivity[32, 3 * 4] and not connectivity[32, 2 * 4]
+        assert not connectivity[0, 4 * 4]
+        assert connectivity[32, 4 * 4] and not connectivity[32, 3 * 4]
 
     def test_parts_to_parts_stays_within_part(self):
         connectivity = parts_to_parts(6, 32, 32)
         assert connectivity.shape == (192, 192)
         assert connectivity[:32, :32].all() and not connectivity[:32, 32:].any()
 
+    def test_output_shape(self):
+        assert parts_to_tokens(self.mask, 32, 4).shape == (92, 192)
+
     def test_uncovered_output_falls_back_to_all_inputs(self):
-        connectivity = parts_to_tokens(self.mask, 32, 4)
-        assert connectivity.shape == (92, 192)
-        # Edge 21 belongs to no part after the double conversion; it reads every part.
-        assert connectivity[21 * 4:22 * 4].all()
+        # Edge 3 belongs to neither explicit part; it reads every part.
+        connectivity = parts_to_tokens(temporal_conv_mask([[0, 1, 2], [0, 2, 3]], 5), 32, 4)
+        assert connectivity[3 * 4:4 * 4].all()
 
     def test_labeled_outputs_read_their_one_owner(self):
         connectivity = parts_to_tokens(self.mask, 32, 4)
@@ -202,8 +193,8 @@ class TestConnectivity:
 
     def test_multiply_owned_outputs_read_every_owner(self):
         connectivity = parts_to_tokens(temporal_conv_mask([[0, 1, 2], [0, 2, 3]], 4), 32, 4)
-        # Double converted, the parts are edges [0] and [0, 1]: edge 0 belongs to both.
-        owners = connectivity[0, ::32].nonzero().flatten().tolist()
+        # Converted, the parts are edges [0, 1] and [1, 2]: edge 1 belongs to both.
+        owners = connectivity[1 * 4, ::32].nonzero().flatten().tolist()
         assert owners == [0, 1]
 
     def test_root_token_reads_all_parts(self):
@@ -235,13 +226,13 @@ class TestAgainstReference:
         num_tokens = len(topology)
         parts = labeled(topology)
 
-        # The encoder's two successive calls, in the same order, over the same lists.
+        # The reference's temporal conv masks convert twice and are intentionally not reproduced; its
+        # single conversion is the skeleton offset mask.
         reference_attention = reference.calselfmask(parts, num_tokens, edges, is_conv=False)
-        reference_conv = reference.calselfmask(parts, num_tokens, edges, is_conv=True)
         reference_skeleton = reference.calselfmask(labeled(topology), num_tokens, edges, is_conv=True)
 
         assert torch.equal(attention_mask(labeled(topology), num_tokens), reference_attention)
-        assert torch.equal(temporal_conv_mask(labeled(topology), num_tokens), reference_conv.bool())
+        assert torch.equal(temporal_conv_mask(labeled(topology), num_tokens), reference_skeleton.bool())
         assert torch.equal(skeleton_offset_mask(labeled(topology), num_tokens), reference_skeleton.bool())
 
     @pytest.mark.parametrize("topology", [FIXTURE_23, FIXTURE_28], ids=["23", "28"])
