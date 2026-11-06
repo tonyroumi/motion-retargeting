@@ -144,9 +144,9 @@ class TestEncoder:
         encoder(x)[:, :, 0].sum().backward()
         read_by_left_leg = x.grad.abs().sum(dim=(0, 1))  # Per channel: 4 per edge, then the root's 3.
 
-        # After double conversion the first part owns edges 0, 1, 2 and the root token.
-        assert read_by_left_leg[:12].sum() > 0
-        assert read_by_left_leg[12:-3].sum() == 0
+        # The first part owns its labeled edges 0, 1, 2, 3 and the root token.
+        assert read_by_left_leg[:16].sum() > 0
+        assert read_by_left_leg[16:-3].sum() == 0
         assert read_by_left_leg[-3:].sum() > 0
 
 class _Zeros(nn.Module):
@@ -297,7 +297,7 @@ class TestDecoder:
             expected = conv[:, edge] if conv[:, edge].any() else torch.ones(NUM_PARTS, dtype=torch.bool)
             assert torch.equal(read, expected), edge
 
-    def test_multiply_owned_and_unassigned_and_root_outputs(self):
+    def test_labeled_and_root_outputs(self):
         decoder = make_decoder().eval()
         code = torch.randn(1, 16, NUM_PARTS, PART_DIM).requires_grad_(True)
         output = decoder(code)
@@ -307,7 +307,7 @@ class TestDecoder:
             return (grad.abs().sum(dim=(0, 1, 3)) > 0).nonzero().flatten().tolist()
 
         assert read_by(slice(10 * 4, 11 * 4)) == [2]  # The spine's last edge, which labeled parts do not share.
-        assert read_by(slice(21 * 4, 22 * 4)) == list(range(NUM_PARTS))  # Unowned after double conversion.
+        assert read_by(slice(21 * 4, 22 * 4)) == [5]  # The right arm's last edge.
         assert read_by(slice(-3, None)) == list(range(NUM_PARTS))  # Root channels.
 
 
