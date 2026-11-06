@@ -7,7 +7,8 @@ ending at joint i is rotated by the accumulated transform including i's own edge
 
 The losses use three distinct position spaces, named here rather than folded into one "global
 positions" helper:
-  - bone_vectors_with_absolute_root:  root entry absolute; every other entry its own bone vector
+  - bone_vectors_with_absolute_root:  root entry its position, integrated from the root velocity from
+                                      the window's first frame; every other entry its own bone vector
   - root_relative_with_absolute_root: root entry absolute; every other entry relative to the root
   - world_positions:                  every entry in world coordinates
 """
@@ -30,16 +31,19 @@ class EdgeForwardKinematics:
 
     def bone_vectors_with_absolute_root(self, motion: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
         """
-        motion:  [B, T, 4E + 3], denormalized
+        motion:  [B, T, 4E + 4], denormalized; the trailing 4 channels are the root velocity (XYZ, yaw rate)
         offsets: [B, J, 3]
         returns: [B, T, J, 3]
         """
         B, T, _ = motion.shape
-        rotations = quat_normalize(motion[..., :-3].reshape(B, T, -1, 4))  # [B, T, E, 4]
+        rotations = quat_normalize(motion[..., :-4].reshape(B, T, -1, 4))  # [B, T, E, 4]
         offsets = offsets[:, None].expand(-1, T, -1, -1)
 
         accumulated = [motion.new_tensor([1.0, 0.0, 0.0, 0.0]).expand(B, T, 4)]
-        vectors = [motion[..., -3:]]
+        # Frame t carries the step t -> t + 1, so the position at t is the sum of the earlier steps; the
+        # first frame is the origin. The yaw rate is not needed, the heading being in the root rotation.
+        linear_velocity = motion[..., -4:-1]
+        vectors = [torch.cumsum(linear_velocity, dim=1) - linear_velocity]
         for joint in range(1, len(self.parents)):
             rotation = quat_mul(accumulated[self.parents[joint]], rotations[:, :, joint - 1])
             accumulated.append(rotation)

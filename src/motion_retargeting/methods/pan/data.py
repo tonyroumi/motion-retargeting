@@ -1,9 +1,8 @@
 """
-PAN's edge / absolute-root data view, following the official Mixamo path.
+PAN's edge / root-velocity data view, following the official Mixamo path.
 
 Built directly from the adapters' MotionCollections, before the shared window construction of
-`MotionDatasetBuilder` (whose windows have already discarded the absolute root and cannot express
-edge rotations). SAN never sees this module.
+`MotionDatasetBuilder` (whose windows cannot express edge rotations). SAN never sees this module.
 
 Known deviations from the original Mixamo assets, on purpose:
   - configs/methods/pan.yaml's sources are AMASS / CMU. Clips are resampled on a timestamp grid (see
@@ -25,6 +24,11 @@ from torch.utils.data import Dataset
 
 from motion_retargeting.data.adapters.factory import build_adapter
 from motion_retargeting.data.representations.motion import MotionCollection
+from motion_retargeting.data.utils import (
+    compute_linear_velocity,
+    compute_yaw_velocity_from_heading,
+    extract_heading_yup,
+)
 
 # A channel whose std falls below this is left unscaled (std 1), as in the official code.
 MIN_STD = 1e-5
@@ -52,23 +56,31 @@ def resample_indices(num_frames: int, fps: float, target_fps: float) -> torch.Te
 
 def to_edge_channels(joint_rotations: torch.Tensor, root_position: torch.Tensor, parents: torch.Tensor) -> torch.Tensor:
     """
-    joint_rotations [T, J, 4] + root_position [T, 3] -> physical channels [T, 4E + 3].
+    joint_rotations [T, J, 4] + root_position [T, 3] -> physical channels [T - 1, 4E + 4].
 
     Edge e = (parent, child), in ascending child index, carries the parent's rotation: a branching
-    joint's rotation repeats on each outgoing edge and a leaf's rotation disappears. Heading, root
-    height and quaternion signs are kept as they are.
+    joint's rotation repeats on each outgoing edge and a leaf's rotation disappears. The root is an
+    additional joint, carrying its velocity for the step t -> t + 1 (hence T - 1 frames): the world XYZ
+    displacement per frame and the yaw rate about the up (Y) axis, in radians per frame. Heading and
+    quaternion signs are kept as they are.
     """
-    edge_rotations = joint_rotations[:, parents[1:]]  # [T, E, 4]
-    return torch.cat([edge_rotations.flatten(1), root_position], dim=-1)
+    edge_rotations = joint_rotations[:-1, parents[1:]]  # [T - 1, E, 4]
+    linear_velocity = compute_linear_velocity(root_position, dt=1.0)[:-1]  # [T - 1, 3]
+    yaw_velocity = compute_yaw_velocity_from_heading(
+        extract_heading_yup(joint_rotations[:, 0]),
+        fps=1.0,
+    )[:-1]  # [T - 1, 1]
+    return torch.cat([edge_rotations.flatten(1), linear_velocity, yaw_velocity], dim=-1)
 
 
 class PANMotionDataset(Dataset):
     """
     Each sample is a window of one skeleton bank:
-      - motion:   [W, 4E + 3], z-score normalized per channel with its bank's statistics
+      - motion:   [W, 4E + 4], z-score normalized per channel with its bank's statistics
       - bank_id:  scalar long, index into `offsets` / `mean` / `std`
 
-    With `augment`, a sample is reversed in time with probability 0.5.
+    With `augment`, a sample is reversed in time with probability 0.5; its root velocity channels
+    are negated with it.
     """
 
     def __init__(
@@ -82,11 +94,11 @@ class PANMotionDataset(Dataset):
         body_joints: Dict[int, List[int]],
         augment: bool = False,
     ):
-        self.motion = motion  # [N, W, 4E + 3], un-normalized
+        self.motion = motion  # [N, W, 4E + 4], un-normalized
         self.bank_ids = bank_ids  # [N]
         self.offsets = offsets  # [K, J, 3], metres
-        self.mean = mean  # [K, 4E + 3]
-        self.std = std  # [K, 4E + 3]
+        self.mean = mean  # [K, 4E + 4]
+        self.std = std  # [K, 4E + 4]
         self.parents = parents  # [J]
         self.body_joints = body_joints  # manually labeled body parts: {part: [joints]}
         self.augment = augment
@@ -116,9 +128,11 @@ class PANMotionDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         bank_id = self.bank_ids[idx]
-        motion = self.normalize(self.motion[idx], bank_id)
+        motion = self.motion[idx]
         if self.augment and torch.rand(1).item() < 0.5:
             motion = motion.flip(0)
+            motion = torch.cat([motion[:, :-4], -motion[:, -4:]], dim=-1)
+        motion = self.normalize(motion, bank_id)
         return {"motion": motion, "bank_id": bank_id}
 
 
@@ -155,6 +169,8 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
             if config.target_fps is not None and clip.fps != config.target_fps:
                 indices = resample_indices(rotations.shape[0], clip.fps, config.target_fps)
                 rotations, root_position = rotations[indices], root_position[indices]
+            if rotations.shape[0] < 2:
+                continue  # A velocity needs two frames.
 
             channels = to_edge_channels(rotations, root_position, parents)
             starts = range(0, channels.shape[0] - config.sequence_length + 1, config.stride)

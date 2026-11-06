@@ -25,8 +25,8 @@ class DomainSpec:
     """ One domain: its topology and skeleton banks, validated on construction. """
     parents: torch.Tensor  # [J], root first with parent -1
     offsets: torch.Tensor  # [K, J, 3], metres
-    mean: torch.Tensor     # [K, 4E + 3]
-    std: torch.Tensor      # [K, 4E + 3]
+    mean: torch.Tensor     # [K, 4E + 4]
+    std: torch.Tensor      # [K, 4E + 4]
     body_joints: Dict[int, List[int]]  # the topology's manually labeled body parts
 
     def __post_init__(self):
@@ -46,7 +46,7 @@ class DomainSpec:
 
     @property
     def num_tokens(self) -> int:
-        """ Network tokens: E edges + the root-position token, which is also J. """
+        """ Network tokens: E edges + the root-velocity token, which is also J. """
         return self.num_joints
 
     @property

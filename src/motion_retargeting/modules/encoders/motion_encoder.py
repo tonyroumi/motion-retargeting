@@ -42,7 +42,7 @@ class MaskedConv1d(nn.Conv1d):
 
 class MotionEncoder(nn.Module):
     """
-    PAN encoder over edge rotations + absolute root position:
+    PAN encoder over edge rotations + root velocity:
     embed (with scale, spatial encoding, dropout) -> prepend part tokens -> post-norm Transformer
     under a directed mask -> two stride-2 temporal convs per part, the first summed with a masked
     stride-2 shortcut from the raw input.
@@ -109,15 +109,14 @@ class MotionEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        x: [B, T, 4E + 3]; a zero pad completes the root token inside the network.
+        x: [B, T, 4E + 4], the E edge tokens and the root-velocity token, 4 channels each.
         returns: [B, T_ds, P, embed_dim]
         """
         B, T, _ = x.shape
 
-        padded = torch.cat([x, x.new_zeros(B, T, 1)], dim=-1)  # [B, T, 4(E + 1)]
-        raw = padded.transpose(1, 2)  # [B, 4(E + 1), T]
+        raw = x.transpose(1, 2)  # [B, 4(E + 1), T]
 
-        tokens = padded.reshape(B, T, -1, self.token_dim)  # [B, T, E + 1, 4]
+        tokens = x.reshape(B, T, -1, self.token_dim)  # [B, T, E + 1, 4]
         tokens = self.embedding(tokens) * math.sqrt(self.embed_dim)
         tokens = self.dropout(self.positional_encoding(tokens))
 

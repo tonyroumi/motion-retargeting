@@ -67,7 +67,7 @@ class PANDomain(nn.Module):
         )
 
     def denormalize(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
-        """ [B, T, 4E + 3], with each sample's bank statistics. """
+        """ [B, T, 4E + 4], with each sample's bank statistics. """
         return motion * self.std[bank_ids][:, None] + self.mean[bank_ids][:, None]
 
     def bones(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
@@ -96,7 +96,7 @@ class PANModel(nn.Module):
 
     def forward_generator(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> GeneratorOutputs:
         """
-        batch: {domain: {"motion": [B, T, 4E + 3], "bank_id": [B]}}
+        batch: {domain: {"motion": [B, T, 4E + 4], "bank_id": [B]}}
 
         Reconstructs every domain, then runs all four source -> destination routes, each with a
         uniformly drawn target bank per sample and independently of how many clips a bank has.
