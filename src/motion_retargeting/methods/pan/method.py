@@ -32,7 +32,7 @@ OFFICIAL_COMMIT = "5a51d929fbb3c804494f1d3c58e4558c3be8e35d"
 
 class PANMethod(RetargetingMethod):
     """
-    PAN retargeting method, following the official code's Mixamo path: edge rotations and absolute root
+    PAN retargeting method, following the official code's Mixamo path: edge rotations and root velocity
     in, masked networks, positional patch discriminators, and the official objective and update order.
     Owns the per-domain networks (`PANModel`) and the generator / discriminator optimizers.
     """
@@ -247,8 +247,8 @@ class PANMethod(RetargetingMethod):
     def compute_generator_losses(self, state: ForwardState) -> Dict[str, torch.Tensor]:
         """
         Weighted generator terms, each logged on its own:
-          - "<domain>/reconstruction": every normalized edge and root channel
-          - "<domain>/root":           denormalized root XYZ over the source's height
+          - "<domain>/reconstruction": every normalized edge and root velocity channel
+          - "<domain>/root":           denormalized root XYZ velocity over the source's height
           - "<domain>/position":       root-relative positions over the source's height
         and on all four "<source>_to_<destination>" routes:
           - latent_cycle:                L1 between the source's code and the fake's re-encoded code
@@ -268,8 +268,8 @@ class PANMethod(RetargetingMethod):
 
             losses[f"{name}/reconstruction"] = cfg.reconstruction_lambda * F.mse_loss(source.reconstruction, source.motion)
             losses[f"{name}/root"] = cfg.root_lambda * F.mse_loss(
-                source.reconstruction_denormalized[..., -3:] / heights,
-                source.denormalized[..., -3:] / heights,
+                source.reconstruction_denormalized[..., -4:-1] / heights,
+                source.denormalized[..., -4:-1] / heights,
             )
             losses[f"{name}/position"] = cfg.position_lambda * F.mse_loss(
                 self.normalized_positions(name, source.reconstruction_bones, source.bank_ids),
@@ -364,7 +364,7 @@ class PANMethod(RetargetingMethod):
         """ What a checkpoint's weights mean. The banks' values live in the model's persistent buffers. """
         return {
             "official_commit": OFFICIAL_COMMIT,
-            "representation": "edge_parent_quaternions_absolute_root_xyz",
+            "representation": "edge_parent_quaternions_root_velocity_xyz_yaw",
             "physical_units": "metres",
             "normalization_scope": "per_skeleton_bank_all_channels_before_holdout",
             "domains": {

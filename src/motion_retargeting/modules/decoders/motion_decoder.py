@@ -16,7 +16,7 @@ class MotionDecoder(nn.Module):
     """
     PAN decoder: two x2 upsamplings, each with a masked reflect-padded conv. The
     first conv stays within each part; the second maps parts to edge and root channels, and has no
-    activation or quaternion normalization after it. The root token's pad channel is dropped.
+    activation or quaternion normalization after it.
     """
 
     def __init__(
@@ -36,11 +36,11 @@ class MotionDecoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: [B, T_ds, P, D], the fused motion and skeleton codes
-        returns: [B, T, 4E + 3]
+        returns: [B, T, 4E + 4]
         """
         x = x.flatten(2, 3).transpose(1, 2)  # [B, P * D, T_ds]
 
         x = self.activation(self.conv1(self.ups(x)))
         x = self.conv2(self.ups(x))
 
-        return x[:, :-1].transpose(1, 2)
+        return x.transpose(1, 2)

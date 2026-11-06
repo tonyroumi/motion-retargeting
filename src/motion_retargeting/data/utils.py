@@ -3,11 +3,11 @@
 # canonicalization. Quaternions are (w, x, y, z), Y is up.
 # """
 
-# from __future__ import annotations
+from __future__ import annotations
 
-# import torch
+import torch
 
-# from motion_retargeting.kinematics.quaternions import quat_conjugate, quat_mul, quat_apply
+from motion_retargeting.kinematics.quaternions import quat_apply
 
 
 # def skeleton_height(
@@ -37,22 +37,22 @@
 #     return h.amax(dim=1) - h.amin(dim=1)
 
 
-# def compute_linear_velocity(
-#     positions: torch.Tensor,
-#     dt: float,
-# ) -> torch.Tensor:
-#     """
-#     positions: [T, 3]
-#     """
-#     velocity = torch.zeros_like(positions)
+def compute_linear_velocity(
+    positions: torch.Tensor,
+    dt: float,
+) -> torch.Tensor:
+    """
+    positions: [T, 3]
+    """
+    velocity = torch.zeros_like(positions)
 
-#     velocity[:-1] = (
-#         positions[1:] - positions[:-1]
-#     ) / dt
+    velocity[:-1] = (
+        positions[1:] - positions[:-1]
+    ) / dt
 
-#     velocity[-1] = velocity[-2]
+    velocity[-1] = velocity[-2]
 
-#     return velocity
+    return velocity
 
 
 # def compute_angular_velocity(
@@ -134,48 +134,48 @@
 #     return angular_velocity
 
 
-# def extract_heading_yup(q: torch.Tensor) -> torch.Tensor:
-#     """
-#     Extract the Y-axis heading quaternion from root orientations.
+def extract_heading_yup(q: torch.Tensor) -> torch.Tensor:
+    """
+    Extract the Y-axis heading quaternion from root orientations.
 
-#     q: [..., 4] quaternion in (w, x, y, z)
-#     Assumes:
-#         - Y is up
-#         - +X is character forward
-#         - active rotations
-#     Returns:
-#         q_heading: [..., 4]
-#     """
-#     forward = torch.zeros(
-#         *q.shape[:-1], 3,
-#         device=q.device,
-#         dtype=q.dtype,
-#     )
-#     forward[..., 0] = 1.0
+    q: [..., 4] quaternion in (w, x, y, z)
+    Assumes:
+        - Y is up
+        - +X is character forward
+        - active rotations
+    Returns:
+        q_heading: [..., 4]
+    """
+    forward = torch.zeros(
+        *q.shape[:-1], 3,
+        device=q.device,
+        dtype=q.dtype,
+    )
+    forward[..., 0] = 1.0
 
-#     # Global facing direction
-#     facing = quat_apply(q, forward)
+    # Global facing direction
+    facing = quat_apply(q, forward)
 
-#     # Project onto horizontal XZ plane
-#     facing[..., 1] = 0.0
-#     facing = facing / torch.linalg.vector_norm(
-#         facing, dim=-1, keepdim=True
-#     ).clamp_min(1e-8)
+    # Project onto horizontal XZ plane
+    facing[..., 1] = 0.0
+    facing = facing / torch.linalg.vector_norm(
+        facing, dim=-1, keepdim=True
+    ).clamp_min(1e-8)
 
-#     # For +X-forward:
-#     # x = cos(yaw), z = -sin(yaw)
-#     yaw = torch.atan2(-facing[..., 2], facing[..., 0])
+    # For +X-forward:
+    # x = cos(yaw), z = -sin(yaw)
+    yaw = torch.atan2(-facing[..., 2], facing[..., 0])
 
-#     half = 0.5 * yaw
+    half = 0.5 * yaw
 
-#     q_heading = torch.stack([
-#         torch.cos(half),
-#         torch.zeros_like(half),
-#         torch.sin(half),
-#         torch.zeros_like(half),
-#     ], dim=-1)
+    q_heading = torch.stack([
+        torch.cos(half),
+        torch.zeros_like(half),
+        torch.sin(half),
+        torch.zeros_like(half),
+    ], dim=-1)
 
-#     return q_heading
+    return q_heading
 
 
 # def canonicalize_root_yup(
@@ -203,48 +203,48 @@
 #     return root_q_canonical, root_vel_canonical, q_heading
 
 
-# def compute_yaw_velocity_from_heading(
-#     q_heading: torch.Tensor,
-#     fps: float,
-# ) -> torch.Tensor:
-#     """
-#     Compute yaw angular velocity directly from pure heading quaternions.
+def compute_yaw_velocity_from_heading(
+    q_heading: torch.Tensor,
+    fps: float,
+) -> torch.Tensor:
+    """
+    Compute yaw angular velocity directly from pure heading quaternions.
 
-#     Args:
-#         q_heading:
-#             Pure Y-axis heading quaternions in (w, x, y, z).
-#             Shape: [T, 4]
+    Args:
+        q_heading:
+            Pure Y-axis heading quaternions in (w, x, y, z).
+            Shape: [T, 4]
 
-#         fps:
-#             Sampling frequency in Hz.
+        fps:
+            Sampling frequency in Hz.
 
-#     Returns:
-#         yaw_velocity:
-#             Shape: [T, 1]
-#             Units: rad/s
-#             Frame t is the step t -> t+1 (like compute_linear_velocity);
-#             the last frame repeats the previous step.
-#     """
-#     w = q_heading[:, 0]
-#     y = q_heading[:, 2]
+    Returns:
+        yaw_velocity:
+            Shape: [T, 1]
+            Units: rad/s
+            Frame t is the step t -> t+1 (like compute_linear_velocity);
+            the last frame repeats the previous step.
+    """
+    w = q_heading[:, 0]
+    y = q_heading[:, 2]
 
-#     # Pure Y-axis quaternion:
-#     # q = [cos(yaw/2), 0, sin(yaw/2), 0]
-#     yaw = 2.0 * torch.atan2(y, w)
+    # Pure Y-axis quaternion:
+    # q = [cos(yaw/2), 0, sin(yaw/2), 0]
+    yaw = 2.0 * torch.atan2(y, w)
 
-#     # Wrapped frame-to-frame difference in [-pi, pi].
-#     dyaw = yaw[1:] - yaw[:-1]
-#     dyaw = torch.atan2(
-#         torch.sin(dyaw),
-#         torch.cos(dyaw),
-#     )
+    # Wrapped frame-to-frame difference in [-pi, pi].
+    dyaw = yaw[1:] - yaw[:-1]
+    dyaw = torch.atan2(
+        torch.sin(dyaw),
+        torch.cos(dyaw),
+    )
 
-#     yaw_velocity = dyaw * fps
+    yaw_velocity = dyaw * fps
 
-#     # Match T frames.
-#     yaw_velocity = torch.cat([
-#         yaw_velocity,
-#         yaw_velocity[-1:],
-#     ], dim=0)
+    # Match T frames.
+    yaw_velocity = torch.cat([
+        yaw_velocity,
+        yaw_velocity[-1:],
+    ], dim=0)
 
-#     return yaw_velocity.unsqueeze(-1)
+    return yaw_velocity.unsqueeze(-1)

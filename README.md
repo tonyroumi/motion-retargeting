@@ -20,7 +20,7 @@ python scripts/retarget.py --model <checkpoint> --source-skeleton <path> --targe
 There is one PAN implementation, and `configs/methods/pan.yaml` is its only training config. Where the
 official code and the paper disagree, it follows the official code: the Mixamo path of
 [`hlcdyy/pan-motion-retargeting`](https://github.com/hlcdyy/pan-motion-retargeting) at commit `5a51d92`.
-That means edge rotations with heading kept, absolute root, full-channel normalization, masked networks,
+That means edge rotations with heading kept, root velocity (XYZ and yaw rate, as an additional joint; the official code uses the absolute root), full-channel normalization, masked networks,
 positional patch discriminators, the official objective, and generator-then-discriminator updates. The
 trainer settings are the published Mixamo command: batch size 128, learning rate 1e-3, 1001 epochs, no
 schedule.
