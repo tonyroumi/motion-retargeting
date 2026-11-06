@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 from torch import nn
 
+from ..encoders.motion_encoder import MaskedConv1d
 from ..utils import get_activation
 
 
@@ -72,3 +73,43 @@ class MotionDecoder(nn.Module):
 
         x = x.permute(0, 2, 1) # [B, T, (J+1)*4]
         return x.reshape(B, T_ds*4, -1, 4)
+
+
+@dataclass
+class ReferenceMotionDecoderConfig:
+    kernel_size: int = 15
+    upsample_mode: str = "linear"
+
+
+class ReferenceMotionDecoder(nn.Module):
+    """
+    PAN reference-Mixamo decoder: two x2 upsamplings, each with a masked reflect-padded conv. The
+    first conv stays within each part; the second maps parts to edge and root channels, and has no
+    activation or quaternion normalization after it. The root token's pad channel is dropped.
+    """
+
+    def __init__(
+        self,
+        part_connectivity: torch.Tensor,
+        output_connectivity: torch.Tensor,
+        kernel_size: int = 15,
+        upsample_mode: str = "linear",
+    ):
+        super().__init__()
+
+        self.ups = nn.Upsample(scale_factor=2, mode=upsample_mode, align_corners=False)
+        self.conv1 = MaskedConv1d(part_connectivity, kernel_size)
+        self.conv2 = MaskedConv1d(output_connectivity, kernel_size)
+        self.activation = nn.LeakyReLU(negative_slope=0.2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B, T_ds, P, D], the fused motion and skeleton codes
+        returns: [B, T, 4E + 3]
+        """
+        x = x.flatten(2, 3).transpose(1, 2)  # [B, P * D, T_ds]
+
+        x = self.activation(self.conv1(self.ups(x)))
+        x = self.conv2(self.ups(x))
+
+        return x[:, :-1].transpose(1, 2)
