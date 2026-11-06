@@ -64,7 +64,7 @@ def to_edge_channels(joint_rotations: torch.Tensor, root_position: torch.Tensor,
     displacement per frame and the yaw rate about the up (Y) axis, in radians per frame. Heading and
     quaternion signs are kept as they are.
     """
-    edge_rotations = joint_rotations[:-1, parents[1:]]  # [T - 1, E, 4]
+    edge_rotations = joint_rotations[:-1, 1:]  # [T - 1, E, 4]
     linear_velocity = compute_linear_velocity(root_position, dt=1.0)[:-1]  # [T - 1, 3]
     yaw_velocity = compute_yaw_velocity_from_heading(
         extract_heading_yup(joint_rotations[:, 0]),

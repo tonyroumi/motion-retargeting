@@ -26,9 +26,6 @@ from .utils import (
     mpjpe,
 )
 
-# The pinned commit of the official PAN code this computation was ported from.
-OFFICIAL_COMMIT = "5a51d929fbb3c804494f1d3c58e4558c3be8e35d"
-
 
 class PANMethod(RetargetingMethod):
     """
@@ -261,6 +258,7 @@ class PANMethod(RetargetingMethod):
 
         positions = {}
         velocities = {}
+        # Reconstruction losses
         for name, source in state.sources.items():
             heights = self.model.domains[name].heights[source.bank_ids][:, None, None]
             positions[name] = self.normalized_positions(name, source.bones, source.bank_ids)
@@ -276,6 +274,7 @@ class PANMethod(RetargetingMethod):
                 positions[name],
             )
 
+        # Retargeting
         for (source, destination), pair in state.pairs.items():
             route = f"{source}_to_{destination}"
             bank_ids = state.sources[source].bank_ids
@@ -363,9 +362,8 @@ class PANMethod(RetargetingMethod):
     def checkpoint_metadata(self) -> Dict[str, Any]:
         """ What a checkpoint's weights mean. The banks' values live in the model's persistent buffers. """
         return {
-            "official_commit": OFFICIAL_COMMIT,
             "representation": "edge_parent_quaternions_root_velocity_xyz_yaw",
-            "physical_units": "metres",
+            "physical_units": "meters",
             "normalization_scope": "per_skeleton_bank_all_channels_before_holdout",
             "domains": {
                 name: {
