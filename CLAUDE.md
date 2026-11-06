@@ -61,7 +61,7 @@ Install the package (editable) and its dependencies with:
 
 pip install -e .
 
-Run tests with pytest.
+Tests are not routinely required. Make sure changed code runs, and run the test suite (pytest) only when explicitly requested.
 
 # Working Guidelines
 
@@ -113,3 +113,7 @@ When asked to implement a specific change:
 - Focus the response on that change.
 - Do not propose multiple alternative architectures unless asked.
 - Clearly identify any assumptions you had to make.
+
+## Delivery
+
+- Do not use the no-mistakes pipeline and do not merge PRs. Pushing task branches to the remote is allowed.
