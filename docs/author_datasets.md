@@ -1,8 +1,8 @@
 # Training on the PAN authors' datasets
 
 These sources load the datasets of the [PAN reference implementation](https://github.com/hlcdyy/pan-motion-retargeting)
-into this repo's `MotionData`. PAN then builds its edge and absolute-root windows from them, and the shared
-`MotionDatasetBuilder` serves SAN by removing heading, resampling and windowing them. The datasets are not downloaded by
+into this repo's `MotionData`. PAN and SAN each build their edge and absolute-root windows from them. The shared
+`MotionDatasetBuilder` can also window them, but neither method's training uses it. The datasets are not downloaded by
 this repo.
 
 ## Raw data
@@ -26,7 +26,8 @@ Paths are relative to the repo root. The `data/` directory is git-ignored.
 
 ## Training
 
-`configs/methods/pan.yaml` is the only PAN config. To train on Mixamo, point its groups at these sources:
+`configs/methods/pan.yaml` and `configs/methods/san.yaml` are the only training configs. To train on Mixamo, point a config's
+groups at these sources:
 
 ```yaml
 dataset:
@@ -36,10 +37,11 @@ dataset:
     sources: [mixamo_b]
 ```
 
-and keep the rest of the file. PAN follows the official Mixamo path, so it needs the six-chain humanoid topology
-(`humanoid_chains` in `methods/pan/masks.py`). `mixamo_a`, `mixamo_b` and `lafan1` have it. **The dog does not: its tail makes
-a seventh chain, so PAN refuses that skeleton with an error.** The official LAFAN1/dog path is a different computation and is
-not implemented here. The `lafan1` and `dog` loaders still load their clips, and both still go through the shared builder.
+and keep the rest of the file. Both methods follow the official Mixamo path, so they need the six-chain humanoid topology
+(`humanoid_chains` in `methods/pan/masks.py` and `methods/san/kinematics.py`). `mixamo_a`, `mixamo_b` and `lafan1` have it.
+**The dog does not: its tail makes a seventh chain, so both methods refuse that skeleton with an error.** PAN's official
+LAFAN1/dog path is a different computation and is not implemented here. The `lafan1` and `dog` loaders still load their clips,
+and the shared builder can still window them.
 
 ## What the adapters do
 
@@ -61,8 +63,8 @@ root +X is mostly vertical.
 
 ## Differences from the reference, shared builder only
 
-PAN's windows follow the reference's Mixamo computation; see the README for what remains different. These differences apply
-only to windows from the shared `MotionDatasetBuilder`, which PAN does not use:
+PAN's and SAN's windows follow their official Mixamo computations; see the README for what remains different. These
+differences apply only to windows from the shared `MotionDatasetBuilder`, which neither method's training uses:
 
 | | Reference | Shared builder |
 |---|---|---|

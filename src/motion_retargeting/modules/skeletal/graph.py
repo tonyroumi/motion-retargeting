@@ -8,11 +8,11 @@ from typing import List, Sequence
 
 def build_edge_list(parents: Sequence[int]) -> List[List[int]]:
     """
-    One (parent, child) edge per joint, in joint order, so row j of per-joint features
-    is edge j. Node ids are shifted by one: the root joint is node 1, reached by a
-    virtual edge from node 0 that carries the root's own features.
+    One (parent, child) edge per non-root joint, in child order, as the official SAN code
+    builds it. Node ids are joint ids and the root is node 0, so E edges plus the global
+    row make J graph rows.
     """
-    return [[int(parent) + 1, joint + 1] for joint, parent in enumerate(parents)]
+    return [[int(parents[joint]), joint] for joint in range(1, len(parents))]
 
 
 def edge_distance_matrix(edge_list: Sequence[Sequence[int]]) -> List[List[float]]:

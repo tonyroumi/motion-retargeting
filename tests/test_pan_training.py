@@ -19,7 +19,6 @@ import pytest
 import torch
 import yaml
 
-from motion_retargeting.data.adapters import MotionSourceAdapter, base
 from motion_retargeting.data.representations.motion import MotionCollection, MotionData
 from motion_retargeting.data.representations.skeleton import SkeletonTopology
 from motion_retargeting.methods.pan import config as pan_config
@@ -32,7 +31,6 @@ from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANMode
 from motion_retargeting.methods.pan.losses import end_effector_terms
 from motion_retargeting.methods.pan.method import PANMethod
 from motion_retargeting.methods.pan.utils import mpjpe, squared_error_over_height2
-from motion_retargeting.methods.san.method import SANMethod
 from motion_retargeting.modules import decoders, discriminators, encoders
 from motion_retargeting.training.trainer import Trainer
 from pan_reference_support import ARGS, load_reference, requires_reference
@@ -781,35 +779,3 @@ class TestEndToEnd:
         assert {gif.name for gif in gifs} == {"group_a_to_group_b.gif", "group_b_to_group_a.gif"}
 
         run.trainer.load_checkpoint(run.trainer.checkpoint_dir / "final.pt")
-
-    def test_san_config_still_uses_the_shared_windows(self, tmp_path, monkeypatch):
-        """ Only PAN reads its own data view: every other method keeps the shared builder's windows. """
-        monkeypatch.setattr(base, "PATHS", SimpleNamespace(data_root=tmp_path))
-        monkeypatch.setattr(base, "label_joint_bodies", lambda topology, offsets: {
-            0: list(range(topology.num_joints // 2)),
-            1: list(range(topology.num_joints // 2, topology.num_joints)),
-        })
-
-        class Source(MotionSourceAdapter):
-            def __init__(self, name):
-                super().__init__(name)
-                self.parents = {"amass": AMASS_PARENTS, "cmu": CMU_PARENTS}[name]
-
-            def _extract(self):
-                clips = [smooth_clip(len(self.parents), 1.0, seed) for seed in range(30)]
-                return [
-                    self._construct_motion(
-                        parents=self.parents,
-                        offsets=clip.offsets,
-                        joint_rotations=clip.joint_rotations,
-                        root_position=clip.root_position,
-                        fps=clip.fps,
-                    )
-                    for clip in clips
-                ]
-
-        monkeypatch.setattr("motion_retargeting.data.factory.build_adapter", Source)
-
-        run = run_training(write_config(ROOT / "configs" / "methods" / "san.yaml", tmp_path), monkeypatch)
-
-        assert type(run.method) is SANMethod

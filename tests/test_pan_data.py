@@ -183,9 +183,9 @@ class TestHoldout:
             build_from_collections([collection(clip()), other], PANDataConfig())
 
 
-class TestSharedBuilderUntouched:
+class TestSharedBuilder:
     def test_shared_windows_keep_final_row_only_normalization(self, tmp_path, monkeypatch):
-        """ The shared builder, which SAN uses, still produces the [W, J+1, 4] window, normalizing only its final row. """
+        """ The shared builder still produces the [W, J+1, 4] window, normalizing only its final row. """
         from types import SimpleNamespace
 
         from motion_retargeting.data.adapters import MotionSourceAdapter, base

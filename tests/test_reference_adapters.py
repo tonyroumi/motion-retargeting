@@ -1,5 +1,5 @@
 """
-Reference dataset adapters on synthetic BVHs, through the shared builder and PAN's data view.
+Reference dataset adapters on synthetic BVHs, through the shared builder and each method's data view.
 
 Set PAN_REFERENCE_ROOT to a checkout of the PAN reference to also run on its demo clips.
 """
@@ -31,6 +31,10 @@ from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANMode
 from motion_retargeting.methods.pan.data import build_splits
 from motion_retargeting.methods.pan.masks import humanoid_chains
 from motion_retargeting.methods.pan.method import PANMethod
+from motion_retargeting.methods.san import kinematics as san_kinematics
+from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
+from motion_retargeting.methods.san.data import build_san_splits
+from motion_retargeting.methods.san.method import SANMethod
 from pan_reference_support import FIXTURE_23, FIXTURE_28
 
 pytest.importorskip("bvhio")
@@ -503,6 +507,43 @@ class TestPAN:
         assert len(humanoid_chains(lafan.topology.parents)) == 6
         with pytest.raises(ValueError, match="body parts"):
             humanoid_chains(dog.topology.parents)
+
+
+class TestSAN:
+    """ SAN follows the same official Mixamo topology: six-chain humanoids only. """
+
+    def test_mixamo_trains_through_san_yaml(self, isolated_data_root):
+        for character, tree in (("Aj", mixamo_a_tree()), ("Malcolm_m", mixamo_b_tree())):
+            write_bvh(isolated_data_root / "raw" / "mixamo" / character / "clip.bvh", tree, num_frames=400)
+
+        with (CONFIGS / "san.yaml").open() as f:
+            cfg = yaml.safe_load(f)
+        cfg["dataset"]["group_a"]["sources"] = ["mixamo_a"]
+        cfg["dataset"]["group_b"]["sources"] = ["mixamo_b"]
+
+        with pytest.warns(UserWarning, match="incomplete"):
+            train_datasets, _ = build_san_splits(cfg["dataset"])
+
+        # An untrained decoder need not produce contact frames, so every frame is selected here.
+        params = {**cfg["method"]["params"], "contact_velocity_threshold": 1e6}
+        method = SANMethod(
+            model_cfg=SANModelConfig.from_dict(cfg["method"]["model"]),
+            domain_specs={name: SANDomainSpec.from_dataset(dataset) for name, dataset in train_datasets.items()},
+            device="cpu",
+            cfg=SANConfig(**params),
+        )
+
+        batches = {name: next(iter(torch.utils.data.DataLoader(dataset, batch_size=2))) for name, dataset in train_datasets.items()}
+        metrics = method.train_step(batches)
+        assert math.isfinite(metrics["total/generator"])
+        assert math.isfinite(metrics["total/discriminator"])
+
+    def test_the_dog_is_refused(self, isolated_data_root):
+        write_bvh(isolated_data_root / "raw" / "dog" / "clip.bvh", dog_tree())
+        with pytest.warns(UserWarning, match="train split"):
+            dog = DogAdapter().load()
+        with pytest.raises(ValueError, match="body parts"):
+            san_kinematics.humanoid_chains(dog.topology.parents)
 
 
 @pytest.mark.skipif(REFERENCE is None, reason="PAN_REFERENCE_ROOT is not set")
