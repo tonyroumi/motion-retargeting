@@ -39,7 +39,15 @@ from motion_retargeting.methods.san.utils import (
     select_banks,
 )
 from motion_retargeting.training.trainer import Trainer
-from san_reference_support import copy_reference_weights, load_reference, reference_edges, requires_reference
+from san_reference_support import (
+    assert_close,
+    copy_reference_weights,
+    discriminator_parameter_pairs,
+    generator_parameter_pairs,
+    load_reference,
+    reference_edges,
+    requires_reference,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = ROOT / "scripts" / "train.py"
@@ -124,7 +132,8 @@ def fixed_outputs(specs, seed: int = 2) -> SANReferenceGeneratorOutputs:
         reconstructions={name: motion(name) for name in specs},
         pairs={
             (source, destination): SANReferencePairOutputs(
-                target_ids=torch.randint(specs[destination].num_banks, (BATCH_SIZE,), generator=generator),
+                # Not palindromic, and more than one bank, so a wrong or reordered bank changes the result.
+                target_ids=torch.arange(BATCH_SIZE) % specs[destination].num_banks,
                 fake=motion(destination),
                 fake_code=code(),
             )
@@ -769,7 +778,7 @@ def run_reference_objective(reference, method: SANReferenceMethod, batch, target
     """
     args = reference.args
     names = list(method.domain_specs)
-    models, topologies = [], []
+    models, topologies, parameter_pairs = [], [], {}
     for name in names:
         spec = method.domain_specs[name]
         topology = (0, *spec.parents.tolist()[1:])
@@ -777,7 +786,12 @@ def run_reference_objective(reference, method: SANReferenceMethod, batch, target
         auto_encoder = reference.AE(args, edges)
         static_encoder = reference.StaticEncoder(args, edges)
         discriminator = reference.Discriminator(args, edges)
-        copy_reference_weights(method.model.domains[name], auto_encoder, static_encoder, discriminator)
+        domain = method.model.domains[name]
+        copy_reference_weights(domain, auto_encoder, static_encoder, discriminator)
+        parameter_pairs[name] = (
+            generator_parameter_pairs(domain, auto_encoder, static_encoder),
+            discriminator_parameter_pairs(domain, discriminator),
+        )
 
         topologies.append(topology)
         models.append(SimpleNamespace(
@@ -809,30 +823,101 @@ def run_reference_objective(reference, method: SANReferenceMethod, batch, target
         criterion_cycle=torch.nn.L1Loss(),
         criterion_ee=reference.Criterion_EE(args, torch.nn.MSELoss()),
         criterion_gan=reference.GAN_loss(args.gan_mode),
+        fake_pools=[reference.ImagePool(args.pool_size) for _ in names],
         loss_recoder=SimpleNamespace(add_scalar=lambda name, value: recorded.__setitem__(name, float(value))),
     )
+    gan.backward_D_basic = lambda *arguments: reference.GAN_model.backward_D_basic(gan, *arguments)
 
+    # GAN_model.optimize_parameters, without its optimizer steps: these weights must stay comparable.
     draws = iter(target_ids)
     with mock.patch.object(torch, "randint", side_effect=lambda *a, **k: next(draws)):
         reference.GAN_model.forward(gan)
+    reference.GAN_model.discriminator_requires_grad_(gan, False)
     reference.GAN_model.backward_G(gan)
+    reference.GAN_model.discriminator_requires_grad_(gan, True)
+    reference.GAN_model.backward_D(gan)
 
-    return SimpleNamespace(recorded=recorded, total=gan.loss_G_total.item())
+    return SimpleNamespace(recorded=recorded, total=gan.loss_G_total.item(), gan=gan, parameter_pairs=parameter_pairs)
+
+
+def parity_specs():
+    """ Rotations move enough that a fake's velocity is not lost beside the source's, with contacts left. """
+    specs = {}
+    for name, spec in make_specs().items():
+        specs[name] = SANReferenceDomainSpec(parents=spec.parents, offsets=spec.offsets, mean=spec.mean, std=spec.std * 10)
+    return specs
+
+
+def parity_target_ids():
+    # Not palindromic, so a reordered or wrong bank changes the result.
+    return [
+        torch.arange(BATCH_SIZE) % NUM_BANKS[destination]
+        for _ in PARENTS
+        for destination in PARENTS
+    ]
 
 
 @requires_reference
 class TestAgainstReference:
-    def test_every_scalar_equals_the_references(self):
+    def test_intermediate_tensors_equal_the_references(self):
         reference = load_reference()
-        method = make_method()
+        method = make_method(parity_specs())
         batch = make_batch(method.domain_specs)
 
-        generator = torch.Generator().manual_seed(5)
-        target_ids = [
-            torch.randint(method.domain_specs[destination].num_banks, (BATCH_SIZE,), generator=generator)
-            for _ in PARENTS
-            for destination in PARENTS
-        ]
+        target_ids = parity_target_ids()
+        gan = run_reference_objective(reference, method, batch, target_ids).gan
+
+        draws = iter(target_ids)
+        with mock.patch.object(torch, "randint", side_effect=lambda *a, **k: next(draws)):
+            state = method.forward_state(batch)
+
+        for index, (name, source) in enumerate(state.sources.items()):
+            assert_close(state.outputs.motion_codes[name], gan.latents[index], f"{name} latent", 1e-3)
+            assert_close(source.reconstruction.transpose(1, 2), gan.res[index], f"{name} reconstruction", 1e-3)
+            assert_close(source.bones, gan.pos_ref[index], f"{name} source bones", 1e-3)
+            assert_close(source.reconstruction_bones, gan.res_pos[index], f"{name} reconstruction bones", 1e-3)
+            velocity = method.normalized_end_effector_velocity(name, source.bones, source.bank_ids)
+            assert_close(velocity, gan.ee_ref[index], f"{name} source velocity", 1e-3)
+
+        for index, (route, pair) in enumerate(state.pairs.items()):
+            outputs = state.outputs.pairs[route]
+            assert_close(outputs.fake.transpose(1, 2), gan.fake_res[index], f"{route} fake", 1e-3)
+            assert_close(outputs.fake_code, gan.fake_latent[index], f"{route} fake code", 1e-3)
+            assert_close(pair.fake_bones, gan.fake_pos[index], f"{route} fake bones", 1e-3)
+            assert_close(pair.fake_velocity, gan.fake_ee[index], f"{route} fake velocity", 1e-2)
+
+    def test_every_gradient_of_a_train_step_equals_the_references(self):
+        reference = load_reference()
+        method = make_method(parity_specs())
+        batch = make_batch(method.domain_specs)
+
+        target_ids = parity_target_ids()
+        run = run_reference_objective(reference, method, batch, target_ids)
+
+        # The optimizers do not step, so both sides' gradients are at the same weights.
+        draws = iter(target_ids)
+        with (
+            mock.patch.object(torch, "randint", side_effect=lambda *a, **k: next(draws)),
+            mock.patch.object(method.generator_optimizer, "step"),
+            mock.patch.object(method.discriminator_optimizer, "step"),
+        ):
+            metrics = method.train_step(batch)
+
+        assert metrics["total/generator"] == pytest.approx(run.total, rel=1e-4)
+        assert metrics["group_a/discriminator"] == pytest.approx(run.recorded["D_loss_0"], rel=1e-4)
+        assert metrics["group_b/discriminator"] == pytest.approx(run.recorded["D_loss_1"], rel=1e-4)
+
+        for name, (generator, discriminator) in run.parameter_pairs.items():
+            for label, ours, theirs in generator + discriminator:
+                assert ours.grad is not None and theirs.grad is not None, f"{name} {label}"
+                assert_close(ours.grad, theirs.grad, f"{name} {label} gradient")
+
+    def test_every_scalar_equals_the_references(self):
+        reference = load_reference()
+        method = make_method(parity_specs())
+        batch = make_batch(method.domain_specs)
+
+        target_ids = parity_target_ids()
 
         draws = iter(target_ids)
         run = run_reference_objective(reference, method, batch, target_ids)

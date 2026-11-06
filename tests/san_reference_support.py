@@ -107,3 +107,50 @@ def copy_reference_weights(domain, auto_encoder, static_encoder, discriminator) 
         assert torch.equal(domain.discriminator.block1.pool.weight, first[2].weight)
         copy_conv(domain.discriminator.block2.conv, second[0])
         assert torch.equal(domain.discriminator.block2.pool.weight, second[1].weight)
+
+
+def generator_parameter_pairs(domain, auto_encoder, static_encoder) -> list:
+    """ (name, our parameter, reference parameter) of a domain's generator networks. """
+    pairs = []
+
+    def add_conv(prefix, conv, reference_conv) -> None:
+        pairs.append((f"{prefix}.weight", conv.weight, reference_conv.weight))
+        pairs.append((f"{prefix}.bias", conv.bias, reference_conv.bias))
+        pairs.append((f"{prefix}.offset.weight", conv.offset_encoder.weight, reference_conv.offset_enc.weight))
+        pairs.append((f"{prefix}.offset.bias", conv.offset_encoder.bias, reference_conv.offset_enc.bias))
+
+    for index, (block, layer) in enumerate(zip((domain.motion_encoder.block1, domain.motion_encoder.block2), auto_encoder.enc.layers)):
+        add_conv(f"encoder{index}", block.conv, layer[0])
+    for index, (block, layer) in enumerate(zip((domain.decoder.block1, domain.decoder.block2), auto_encoder.dec.layers)):
+        add_conv(f"decoder{index}", block.conv, layer[2])
+
+    # Only the static encoder's first layer is live; the second never gets a gradient on either side.
+    block, layer = domain.offset_encoder.block1, static_encoder.layers[0]
+    pairs.append(("static0.weight", block.conv.weight, layer[0].weight))
+    pairs.append(("static0.bias", block.conv.bias, layer[0].bias))
+    return pairs
+
+
+def discriminator_parameter_pairs(domain, discriminator) -> list:
+    """ (name, our parameter, reference parameter) of a discriminator, its trained structure included. """
+    first, second = discriminator.layers
+    block1, block2 = domain.discriminator.block1, domain.discriminator.block2
+    return [
+        ("block1.weight", block1.conv.weight, first[0].weight),
+        ("block1.mask", block1.conv.mask, first[0].mask),
+        ("block1.norm.weight", block1.norm.weight, first[1].weight),
+        ("block1.norm.bias", block1.norm.bias, first[1].bias),
+        ("block1.pool", block1.pool.weight, first[2].weight),
+        ("block2.weight", block2.conv.weight, second[0].weight),
+        ("block2.bias", block2.conv.bias, second[0].bias),
+        ("block2.mask", block2.conv.mask, second[0].mask),
+        ("block2.pool", block2.pool.weight, second[1].weight),
+    ]
+
+
+def assert_close(ours: torch.Tensor, theirs: torch.Tensor, name: str, relative: float = 2e-2) -> None:
+    """ Relative to the tensor's own norm: float32 noise on summed large terms, not an absolute scale. """
+    ours, theirs = ours.reshape(theirs.shape), theirs
+    assert theirs.norm() > 0, f"{name}: the reference tensor is zero, so this comparison says nothing"
+    error = ((ours - theirs).norm() / theirs.norm()).item()
+    assert error < relative, f"{name}: relative error {error}"
