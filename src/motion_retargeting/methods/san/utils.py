@@ -1,91 +1,60 @@
 """
-SAN helpers: generator outputs and kinematic utilities.
+SAN helpers: generator outputs and metric utilities.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple
+from typing import Dict, List, Tuple
 
 import torch
 
-from motion_retargeting.kinematics.quaternions import quat_apply, quat_mul
 
-from .config import DomainSpec
+@dataclass
+class PairOutputs:
+    """ One source -> destination route (same-domain routes included). """
+    target_ids: torch.Tensor  # [B], the destination bank each sample is retargeted onto
+    fake: torch.Tensor        # [B, T, 4E + 3], normalized with the target's statistics
+    fake_code: torch.Tensor   # fake re-encoded by the destination's motion encoder
 
 
 @dataclass
 class GeneratorOutputs:
-    # Main predictions
-    group_ab: torch.Tensor
-    group_ba: torch.Tensor
-
-    # Reconstructions
-    group_aa: torch.Tensor
-    group_bb: torch.Tensor
-
-    # Latent representations
-    motion_code_a: torch.Tensor
-    motion_code_b: torch.Tensor
-    motion_code_aa: torch.Tensor  # group_aa re-encoded by group_a's motion encoder
-    motion_code_ab: torch.Tensor  # group_ab re-encoded by group_b's motion encoder
-    motion_code_ba: torch.Tensor  # group_ba re-encoded by group_a's motion encoder
-    motion_code_bb: torch.Tensor  # group_bb re-encoded by group_b's motion encoder
+    motion_codes: Dict[str, torch.Tensor]
+    reconstructions: Dict[str, torch.Tensor]
+    pairs: Dict[Tuple[str, str], PairOutputs]
 
 
-class DomainOutputs(NamedTuple):
-    """ The generator outputs one domain's losses are computed from (decoder layout for motions). """
-    reconstruction: torch.Tensor    # d -> d
-    retargeted_into: torch.Tensor   # other -> d
-    motion_code: torch.Tensor       # E_d(d)
-    reconstructed_code: torch.Tensor  # E_d(d -> d)
-    retargeted_code: torch.Tensor   # E_other(d -> other)
+@dataclass
+class SourceState:
+    """ One domain's source batch and its reconstruction, in the spaces the losses use. """
+    bank_ids: torch.Tensor
+    motion: torch.Tensor
+    denormalized: torch.Tensor
+    bones: torch.Tensor  # bone_vectors_with_absolute_root, detached
+    reconstruction: torch.Tensor
+    reconstruction_denormalized: torch.Tensor
+    reconstruction_bones: torch.Tensor
 
 
-class DomainPositions(NamedTuple):
-    """ Global joint positions [B, W, J, 3] on one domain's skeleton. """
-    real: torch.Tensor              # d's input motion
-    reconstruction: torch.Tensor    # d -> d
-    retargeted_into: torch.Tensor   # other -> d, judged by d's discriminator
+@dataclass
+class PairState:
+    target_ids: torch.Tensor
+    fake_bones: torch.Tensor     # With the target bank's statistics and offsets
+    fake_velocity: torch.Tensor  # Scaled end-effector velocity over the target bank's height
 
 
-def split_by_domain(outputs: GeneratorOutputs) -> Dict[str, DomainOutputs]:
-    return {
-        "group_a": DomainOutputs(
-            reconstruction=outputs.group_aa,
-            retargeted_into=outputs.group_ba,
-            motion_code=outputs.motion_code_a,
-            reconstructed_code=outputs.motion_code_aa,
-            retargeted_code=outputs.motion_code_ab,
-        ),
-        "group_b": DomainOutputs(
-            reconstruction=outputs.group_bb,
-            retargeted_into=outputs.group_ab,
-            motion_code=outputs.motion_code_b,
-            reconstructed_code=outputs.motion_code_bb,
-            retargeted_code=outputs.motion_code_ba,
-        ),
-    }
+@dataclass
+class ForwardState:
+    """ One generator forward and its kinematics; both optimizer steps of a train step reuse it. """
+    outputs: GeneratorOutputs
+    sources: Dict[str, SourceState]
+    pairs: Dict[Tuple[str, str], PairState]
 
 
-def restore_motion(
-    rotations: torch.Tensor,
-    root_vel: torch.Tensor,
-    q_heading: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """ Put the window's heading [B, W, 4] back on the root rotation and root velocity. """
-    rotations = rotations.clone()
-
-    rotations[..., 0, :] = quat_mul(q_heading, rotations[..., 0, :])
-
-    return rotations, quat_apply(q_heading, root_vel)
-
-
-def denormalize(motion: torch.Tensor, spec: DomainSpec) -> torch.Tensor:
-    """ Undo the domain's z-score normalization of network-layout motion [..., J+1, 4]. """
-    motion[..., -1, :-1] = motion[..., -1, :-1] * spec.vel_stats.std.to(motion) + spec.vel_stats.mean.to(motion)
-    motion[..., -1, -1] = motion[..., -1, -1] * spec.ang_vel_stats.std.to(motion) + spec.ang_vel_stats.mean.to(motion)
-    return motion
+def select_banks(static: List[torch.Tensor], bank_ids: torch.Tensor) -> List[torch.Tensor]:
+    """ Each level of a domain's static features over all K banks, at each sample's bank. """
+    return [level[bank_ids] for level in static]
 
 
 def total(losses: Dict[str, torch.Tensor], total_name: str) -> tuple[torch.Tensor, Dict[str, float]]:
@@ -96,25 +65,22 @@ def total(losses: Dict[str, torch.Tensor], total_name: str) -> tuple[torch.Tenso
     return loss, info
 
 
-def skeleton_height(offsets: torch.Tensor, parents: torch.Tensor) -> torch.Tensor:
-    """ Longest root-to-joint bone chain per skeleton: offsets [B, J, 3] -> [B]. """
-    bone_lengths = offsets.norm(dim=-1)
-
-    chains = [bone_lengths[:, 0]]
-    for joint in range(1, offsets.shape[1]):
-        chains.append(chains[parents[joint].item()] + bone_lengths[:, joint])
-
-    return torch.stack(chains, dim=1).amax(dim=1)
-
-
-def end_effector_velocity(positions: torch.Tensor, end_effectors: List[int]) -> torch.Tensor:
-    """ Per-frame displacement of the end-effectors: positions [B, W, J, 3] -> [B, W-1, E, 3]. """
-    return positions[:, 1:, end_effectors] - positions[:, :-1, end_effectors]
+def require_finite(losses: Dict[str, torch.Tensor]) -> None:
+    """ Stop before an optimizer step would apply a NaN or infinite loss to the weights. """
+    bad = [name for name, loss in losses.items() if not torch.isfinite(loss)]
+    if bad:
+        raise RuntimeError(f"Non-finite loss terms, no optimizer stepped on them: {bad}")
 
 
 def mpjpe(predicted: torch.Tensor, target: torch.Tensor) -> float:
     """ Mean per-joint position error: mean Euclidean distance over [..., J, 3]. """
     return (predicted - target).norm(dim=-1).mean().item()
+
+
+def squared_error_over_height2(predicted: torch.Tensor, target: torch.Tensor, heights: torch.Tensor) -> float:
+    """ Mean squared coordinate error / height^2: predicted, target [B, ..., J, 3], heights [B]. Not MPJPE. """
+    heights = heights.reshape(-1, *[1] * (predicted.ndim - 1))
+    return (((predicted - target) / heights) ** 2).mean().item()
 
 
 def side_by_side(

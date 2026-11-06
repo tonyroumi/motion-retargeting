@@ -1,3 +1,10 @@
+# SAN, computing what the official code does (DeepMotionEditing/deep-motion-editing at 74fff8f) on the
+# AMASS / CMU sources. See the README for what that does not reproduce.
+#
+#   - Skeleton banks: clips with exactly equal offsets stand in for Mixamo characters.
+#   - Statistics are fit per bank before the holdout, as the official code does, so the holdout is a
+#     reproduction diagnostic and not clean evidence of generalization.
+#   - Frames are resampled to target_fps on a timestamp grid, not with Mixamo's literal ::2.
 device: cuda
 
 dataset:
@@ -8,8 +15,7 @@ dataset:
       sequence_length: 64
       stride: 32
       target_fps: 30
-      # max_samples:
-      # seed:
+      holdout_percent: 5
 
   group_b:
     sources:
@@ -18,8 +24,7 @@ dataset:
       sequence_length: 64
       stride: 32
       target_fps: 30
-      # max_samples:
-      # seed:
+      holdout_percent: 5
 
 method:
   name: san
@@ -151,17 +156,17 @@ method:
     swap_probability: 0.5
 
     # Adam betas of both optimizers
-    betas: [0.09, 0.99]
+    betas: [0.9, 0.999]
 
     # Loss weights (the root / joint position terms are also scaled by reconstruction_lambda)
     reconstruction_lambda: 5.0
     position_lambda: 100.0
     root_position_lambda: 2.5
     cycle_consistency_lambda: 2.5
-    end_effector_lambda: 1.0
-    adversarial_lambda: 50.0
+    end_effector_lambda: 50.0
+    adversarial_lambda: 1.0
 
-    # End-effector contacts: slower than the threshold (skeleton heights per frame)
+    # End-effector contacts: generated velocity slower than the threshold (scaled skeleton heights per frame)
     contact_lambda: 100.0
     contact_velocity_threshold: 0.008
 
@@ -171,9 +176,8 @@ method:
 trainer:
   batch_size: 256
   learning_rate: 0.0002
-  num_epochs: 20000
-  val_fraction: 0.1
-  test_fraction: 0.0
+  # The official 160,008 steps at 104 steps per epoch. Recompute this if the window count changes.
+  num_epochs: 1539
 
   log_interval: 10
   validation_interval: 25

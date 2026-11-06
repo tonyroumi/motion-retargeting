@@ -20,6 +20,7 @@ from motion_retargeting.methods.pan.config import (
 from motion_retargeting.methods.pan.data import build_reference_splits
 from motion_retargeting.methods.pan.method import PANMethod, PANReferenceMethod
 from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
+from motion_retargeting.methods.san.data import build_san_splits
 from motion_retargeting.methods.san.method import SANMethod
 from motion_retargeting.training.trainer import Trainer, TrainerConfig
 from motion_retargeting.training.utils import ZippedLoaders
@@ -62,6 +63,9 @@ def main():
     if uses_reference_recipe(cfg["method"]):
         # Built from the raw collections: the shared windows below have no absolute root or edges.
         train_datasets, val_datasets = build_reference_splits(cfg["dataset"])
+    elif cfg["method"]["name"] == "san":
+        # Built from the raw collections: the shared windows below have no absolute root or edges.
+        train_datasets, val_datasets = build_san_splits(cfg["dataset"])
     else:
         datasets = build_datasets(cfg["dataset"])
 

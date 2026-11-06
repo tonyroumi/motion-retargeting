@@ -72,6 +72,70 @@ PAN_REFERENCE_ROOT=<reference checkout> pytest tests/test_pan_reference_*.py
 
 To train on the PAN authors' datasets (Mixamo, LAFAN1 and the dog), see [docs/author_datasets.md](docs/author_datasets.md).
 
+## SAN
+
+There is one SAN implementation, `SANMethod`, and one config, `configs/methods/san.yaml`. It computes what the
+official code does at `DeepMotionEditing/deep-motion-editing` commit `74fff8f`, which is the source of truth where
+it disagrees with the paper: edge rotations and absolute root, full-channel normalization, the official token
+graph, bone-space discriminators, the official objective and generator-then-discriminator updates.
+
+```bash
+python scripts/train.py --config configs/methods/san.yaml
+```
+
+Checkpoints record the official commit, representation, units, normalization scope, kept accidents, skeleton
+banks and endpoints. Loading refuses any other computation or setup. **SAN checkpoints saved before this
+computation do not load.**
+
+**An empty contact selection stops training.** Contacts are selected on the generated motion. If a route has
+no generated end-effector sample below the threshold, the official code trains on `NaN`; here training stops
+with an error before either optimizer steps. Each route logs `<source>_to_<destination>/contact_fraction`, so a
+run approaching zero is visible first. Whether that fraction levels off in long runs is not established.
+
+### What this does not reproduce
+
+It runs on the AMASS and CMU sources, so it does not reproduce the paper's dataset-level scores, and no such
+claim should be made without an actual matched evaluation. The published errors are not the target of a model
+trained from this commit either, because the published weights ignore the skeleton input. The remaining
+differences:
+
+- **Sources and units.** AMASS and CMU in metres, not Mixamo's BVH assets. Offsets go to the static path in
+  centimetres, so the skeleton term keeps its strength, and to FK and the discriminators in metres.
+- **Characters.** A skeleton bank, meaning clips with exactly equal offsets, stands in for a Mixamo character.
+  It does not identify a capture subject, and each bank gets its own statistics. Startup prints the windows per
+  bank, because a thin bank's statistics describe one or two clips.
+- **Sampling.** Each domain's motion is sampled independently, not by shared index, so the official truncation
+  of its longer group is not reproduced. Frames are resampled on a timestamp grid, not by `::2`.
+- **Training length.** A step budget, not an epoch count: `num_epochs: 1539` is the official 160,008 steps at 104
+  steps per epoch. Recompute it if the window count changes.
+- **Empty contact selection.** Stopping instead of `NaN`, as above.
+- **Holdout.** As in the official code, statistics are fit before the 95/5 holdout, so it is a reproduction
+  diagnostic, not clean evidence of generalization.
+- **Metrics.** There is no paired ground truth. `reconstruction_mpjpe_m` is Euclidean error in metres, and
+  `reconstruction_squared_error_over_height2` is the official metric's form on reconstruction only. Neither is
+  paired retarget accuracy.
+
+### Accidents of the official code, kept on purpose
+
+These are official behavior, reproduced for parity and not because they are scientifically intended. Repairing
+any of them would be a different experiment, and should be labeled as one.
+
+- **Global token's neighbors.** It reads the neighbors of edge 0, not of the root, and never itself. The
+  maintainers have called this a bug (issue 30). It is still kept, because every model trained from this commit
+  has it.
+- **Joint rows through edge masks.** The static path feeds J joint rows through masks indexed by token, so a token
+  reads a joint other than its edge's child, and the global slot reads the last joint. AMASS's joint numbering is
+  not depth-first, so on AMASS this crosses chains.
+- **Trained discriminator structure.** The discriminator's convolution masks and pooling matrices are trained.
+  After one step both pooling matrices are fully dense.
+- **Contact selection.** Contacts are chosen on generated velocity below `0.008`, not on the source's.
+
+The differential tests compare against the official source, when it is available:
+
+```bash
+SAN_REFERENCE_ROOT=<deep-motion-editing checkout at 74fff8f>/retargeting pytest tests/test_san_*.py
+```
+
 ## Acknowledgments
 
 This project builds on ideas and methods introduced in

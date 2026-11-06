@@ -22,20 +22,22 @@ def generator_adversarial_loss(fake_scores: torch.Tensor) -> torch.Tensor:
     return F.mse_loss(fake_scores, torch.ones_like(fake_scores))
 
 
-def end_effector_loss(
-    predicted: torch.Tensor,
-    target: torch.Tensor,
-    contact_lambda: float = 100.0,
+def end_effector_terms(
+    source_velocity: torch.Tensor,
+    fake_velocity: torch.Tensor,
     velocity_threshold: float = 0.008,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    End-effector velocity loss over [B, W-1, E, 3], with an extra term on the end-effectors
-    that are in contact (moving slower than `velocity_threshold`) in the target.
+    (transfer, contact) MSEs between normalized end-effector velocities [B, T - 1, E, 3]. As in the official
+    code, contact frames are selected on the *generated* velocity, not the source's.
+
+    An empty selection is NaN in the official code, which then trains through it. Here it raises instead:
+    a zero contact term would be a different objective, not this one.
     """
-    loss = F.mse_loss(predicted, target)
-
-    contact = target.norm(dim=-1) < velocity_threshold
-    if contact.any():
-        loss = loss + contact_lambda * F.mse_loss(predicted[contact], target[contact])
-
-    return loss
+    contacts = torch.linalg.vector_norm(fake_velocity, dim=-1) < velocity_threshold
+    if not contacts.any():
+        raise RuntimeError(
+            f"End-effector loss: no generated velocity is below the contact threshold {velocity_threshold} "
+            f"(the official contact term is NaN here). Stopping before any optimizer step of this batch."
+        )
+    return F.mse_loss(fake_velocity, source_velocity), F.mse_loss(fake_velocity[contacts], source_velocity[contacts])
