@@ -15,10 +15,17 @@ from motion_retargeting.kinematics import ForwardKinematics
 from motion_retargeting.methods.base import RetargetingMethod
 from motion_retargeting.methods.pan.kinematics import end_effector_velocity as scaled_end_effector_velocity
 from motion_retargeting.methods.pan.losses import reference_end_effector_terms
-from motion_retargeting.methods.pan.utils import ReferenceSourceState, require_finite
+from motion_retargeting.methods.pan.utils import ReferenceSourceState, require_finite, squared_error_over_height2
 from motion_retargeting.resources.replay_buffer import ReplayBuffer
 
-from .config import DomainSpec, SANConfig, SANModelConfig, SANReferenceConfig, SANReferenceDomainSpec
+from .config import (
+    DomainSpec,
+    REFERENCE_RECIPE,
+    SANConfig,
+    SANModelConfig,
+    SANReferenceConfig,
+    SANReferenceDomainSpec,
+)
 from .losses import adversarial_loss, end_effector_loss, generator_adversarial_loss
 from .model import SANModel, SANReferenceModel
 from .utils import (
@@ -35,6 +42,9 @@ from .utils import (
     split_by_domain,
     total,
 )
+
+# The pinned reference commit the "mixamo_reference" recipe's computation was ported from.
+REFERENCE_COMMIT = "74fff8fb35e6378351d03fb14ee22fccae28b0bf"
 
 
 class SANMethod(RetargetingMethod):
@@ -462,6 +472,50 @@ class SANReferenceMethod(SANMethod):
 
         return {**generator_info, **discriminator_info, **grad_info}
 
+    @torch.no_grad()
+    def validation_step(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> Dict[str, float]:
+        """
+        Unpaired diagnostics, keyed "<domain>/val/<metric>" for source motion of <domain>:
+          - reconstruction_mse:                        the normalized network channels
+          - reconstruction_mpjpe_m:                    Euclidean world joint error, in metres
+          - reconstruction_squared_error_over_height2: mean squared world coordinate error / height^2, the
+                                                       form of the reference's metric on an unpaired task
+          - retarget_latent_l1, retarget_realism, retarget_ee_velocity: of the cross-domain route
+
+        There is no paired ground truth here: none of these is paired retarget accuracy, and none is
+        comparable to a paper score. The holdout's statistics include its own windows.
+        """
+        state = self.forward_state(batch)
+        domains = self.model.domains
+        metrics = {}
+
+        for name, source in state.sources.items():
+            other = next(domain for domain in domains if domain != name)
+            pair = state.pairs[(name, other)]
+            fk = domains[name].fk
+
+            positions = fk.world_positions(source.bones)
+            reconstruction = fk.world_positions(source.reconstruction_bones)
+
+            prefix = f"{name}/val/"
+            metrics.update({
+                prefix + "reconstruction_mse": F.mse_loss(source.reconstruction, source.motion).item(),
+                prefix + "reconstruction_mpjpe_m": mpjpe(reconstruction, positions),
+                prefix + "reconstruction_squared_error_over_height2": squared_error_over_height2(
+                    reconstruction, positions, domains[name].heights[source.bank_ids]
+                ),
+                prefix + "retarget_latent_l1": F.l1_loss(
+                    state.outputs.pairs[(name, other)].fake_code, state.outputs.motion_codes[name]
+                ).item(),
+                prefix + "retarget_realism": domains[other].discriminate(pair.fake_bones).mean().item(),
+                prefix + "retarget_ee_velocity": F.mse_loss(
+                    pair.fake_velocity,
+                    self.normalized_end_effector_velocity(name, source.bones, source.bank_ids),
+                ).item(),
+            })
+
+        return metrics
+
     def set_discriminator_requires_grad(self, requires_grad: bool) -> None:
         for parameter in self.model.discriminator_parameters():
             parameter.requires_grad_(requires_grad)
@@ -581,3 +635,86 @@ class SANReferenceMethod(SANMethod):
                     discriminate(fake),
                 )
         return losses
+
+    @torch.no_grad()
+    def visualize(
+        self,
+        batch: Dict[str, Dict[str, torch.Tensor]],
+        save_dir: str | Path,
+        fps: float = 30.0,
+    ) -> None:
+        """
+        Save one animation per cross-domain route of the batch's first sample: the source motion (left)
+        next to it on a drawn target bank (right), both absolute-root world positions with no external
+        heading restored, as "<source>_to_<destination>.gif" in `save_dir`.
+        """
+        from motion_retargeting.data.visualization.visualize import visualize_motion
+
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        batch = {domain: {key: value[:1] for key, value in item.items()} for domain, item in batch.items()}
+        state = self.forward_state(batch)
+        domains = self.model.domains
+
+        for (source, destination), pair in state.pairs.items():
+            if source == destination:
+                continue
+
+            positions, parents = side_by_side(
+                domains[source].fk.world_positions(state.sources[source].bones)[0],
+                self.domain_specs[source].parents,
+                domains[destination].fk.world_positions(pair.fake_bones)[0],
+                self.domain_specs[destination].parents,
+            )
+            visualize_motion(
+                positions,
+                parent_indices=parents,
+                fps=fps,
+                save_path=save_dir / f"{source}_to_{destination}.gif",
+            )
+
+    def recipe_metadata(self) -> Dict[str, Any]:
+        """ What a checkpoint's weights mean. The banks' values live in the model's persistent buffers. """
+        kept_accidents = [
+            "global_token_reads_edge_0_neighbors",
+            "joint_offset_rows_through_edge_masks",
+            "contacts_selected_on_generated_velocity",
+        ]
+        if self.model_cfg.motion_discriminator.train_structure:
+            kept_accidents.append("discriminator_masks_and_pools_trained")
+
+        return {
+            "recipe": REFERENCE_RECIPE,
+            "reference_commit": REFERENCE_COMMIT,
+            "representation": "edge_parent_quaternions_absolute_root_xyz",
+            "physical_units": "metres_with_static_path_offsets_in_centimetres",
+            "normalization_scope": "per_skeleton_bank_all_channels_before_holdout",
+            "kept_accidents": kept_accidents,
+            "domains": {
+                name: {
+                    "parents": spec.parents.tolist(),
+                    "num_skeleton_banks": spec.num_banks,
+                    "end_effector_ids": spec.ee_ids,
+                }
+                for name, spec in self.domain_specs.items()
+            },
+        }
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {**super().state_dict(), "recipe": self.recipe_metadata()}
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """ Rejects legacy or otherwise incompatible checkpoints rather than reusing their weights. """
+        if "recipe" not in state_dict:
+            raise ValueError(
+                f"This checkpoint has no recipe metadata, so it is from the legacy SAN recipe and "
+                f"cannot be loaded into '{REFERENCE_RECIPE}'."
+            )
+
+        expected, found = self.recipe_metadata(), state_dict["recipe"]
+        different = [key for key in expected if found.get(key) != expected[key]]
+        if different:
+            raise ValueError(f"Checkpoint is incompatible with this '{REFERENCE_RECIPE}' setup, differing in: {different}")
+
+        super().load_state_dict(state_dict)

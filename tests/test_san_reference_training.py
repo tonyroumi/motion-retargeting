@@ -5,23 +5,46 @@ parity checks that run when SAN_REFERENCE_ROOT is set.
 
 from __future__ import annotations
 
+import runpy
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+import matplotlib
+
+matplotlib.use("Agg")
 
 import pytest
 import torch
 import torch.nn.functional as F
+import yaml
 
+from motion_retargeting.data.adapters import MotionSourceAdapter, base
+from motion_retargeting.data.representations.motion import MotionCollection, MotionData
+from motion_retargeting.data.representations.skeleton import SkeletonTopology
 from motion_retargeting.methods.pan.kinematics import END_EFFECTOR_VELOCITY_SCALE
-from motion_retargeting.methods.san.config import SANModelConfig, SANReferenceConfig, SANReferenceDomainSpec
-from motion_retargeting.methods.san.method import SANReferenceMethod
+from motion_retargeting.methods.san.config import (
+    DomainSpec,
+    SANConfig,
+    SANModelConfig,
+    SANReferenceConfig,
+    SANReferenceDomainSpec,
+)
+from motion_retargeting.methods.san.method import SANMethod, SANReferenceMethod
 from motion_retargeting.methods.san.model import SANReferenceModel
 from motion_retargeting.methods.san.utils import (
     SANReferenceGeneratorOutputs,
     SANReferencePairOutputs,
     select_banks,
 )
+from motion_retargeting.training.trainer import Trainer
 from san_reference_support import copy_reference_weights, load_reference, reference_edges, requires_reference
+
+ROOT = Path(__file__).resolve().parents[1]
+TRAIN_SCRIPT = ROOT / "scripts" / "train.py"
+REFERENCE_CONFIG = ROOT / "configs" / "methods" / "san_reference.yaml"
+LEGACY_CONFIG = ROOT / "configs" / "methods" / "san.yaml"
 
 # The AMASS and CMU skeletons of configs/methods/san_reference.yaml.
 AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
@@ -461,6 +484,231 @@ class TestUpdateOrder:
         ):
             assert key in metrics, key
         assert all(isinstance(value, float) and value == value for value in metrics.values())
+
+
+class TestValidation:
+    def test_metrics_per_source_domain_leave_parameters_alone(self):
+        method = make_method()
+        method.eval()
+        parameters = list(method.model.parameters())
+        before = snapshot(parameters)
+
+        metrics = method.validation_step(make_batch(method.domain_specs))
+
+        assert set(metrics) == {
+            f"{name}/val/{metric}"
+            for name in PARENTS
+            for metric in (
+                "reconstruction_mse",
+                "reconstruction_mpjpe_m",
+                "reconstruction_squared_error_over_height2",
+                "retarget_latent_l1",
+                "retarget_realism",
+                "retarget_ee_velocity",
+            )
+        }
+        assert all(isinstance(value, float) for value in metrics.values())
+        assert changed(parameters, before) == 0
+
+    def test_validation_does_not_need_a_generated_contact(self):
+        method = make_method(contact_threshold=0.0)
+        method.eval()
+        method.validation_step(make_batch(method.domain_specs))
+
+    def test_metric_fixture_tells_mpjpe_from_squared_error_over_height(self):
+        specs = make_specs()
+        method = make_method(specs)
+        method.eval()
+        batch = make_batch(specs)
+        batch["group_a"]["bank_id"] = torch.zeros(BATCH_SIZE, dtype=torch.long)
+
+        # Shift the reconstructed root by 3 cm along X and 4 cm along Y: every joint is 5 cm off.
+        spec = specs["group_a"]
+        shift = torch.tensor([0.03, 0.04, 0.0])
+        reconstruction = batch["group_a"]["motion"].clone()
+        reconstruction[..., -3:] += shift / spec.std[0, -3:]
+
+        outputs = fixed_outputs(specs)
+        outputs.reconstructions["group_a"] = reconstruction
+
+        with mock.patch.object(method.model, "forward_generator", return_value=outputs):
+            metrics = method.validation_step(batch)
+
+        height = spec.heights[0].item()
+        assert metrics["group_a/val/reconstruction_mpjpe_m"] == pytest.approx(0.05, rel=1e-3)
+        # Mean over the three coordinates of the squared error, over height squared.
+        assert metrics["group_a/val/reconstruction_squared_error_over_height2"] == pytest.approx(
+            (0.03 ** 2 + 0.04 ** 2) / 3 / height ** 2, rel=1e-3
+        )
+
+
+class TestCheckpoints:
+    def test_save_and_reload_gives_equal_outputs_with_the_trained_structure(self):
+        specs = make_specs()
+        method = make_method(specs)
+        batch = make_batch(specs)
+        method.train_step(batch)
+
+        restored = make_method(specs, seed=9)
+        restored.load_state_dict(method.state_dict())
+
+        method.eval()
+        restored.eval()
+        with torch.no_grad():
+            torch.manual_seed(4)
+            ours = method.forward_state(batch)
+            torch.manual_seed(4)
+            theirs = restored.forward_state(batch)
+
+        assert torch.equal(ours.sources["group_a"].reconstruction, theirs.sources["group_a"].reconstruction)
+        pair, restored_pair = ours.pairs[("group_a", "group_b")], theirs.pairs[("group_a", "group_b")]
+        assert torch.equal(pair.fake_bones, restored_pair.fake_bones)
+        domain, restored_domain = method.model.domains["group_b"], restored.model.domains["group_b"]
+        assert torch.equal(domain.discriminate(pair.fake_bones), restored_domain.discriminate(pair.fake_bones))
+
+    def test_metadata_records_what_the_weights_mean(self):
+        metadata = make_method().state_dict()["recipe"]
+        assert metadata["recipe"] == "mixamo_reference"
+        assert metadata["reference_commit"].startswith("74fff8f")
+        assert metadata["representation"] and metadata["physical_units"] and metadata["normalization_scope"]
+        assert "discriminator_masks_and_pools_trained" in metadata["kept_accidents"]
+        assert metadata["domains"]["group_a"] == {
+            "parents": AMASS_PARENTS,
+            "num_skeleton_banks": 3,
+            "end_effector_ids": [10, 11, 15, 20, 21],
+        }
+
+    def test_legacy_checkpoint_gives_a_clear_error(self):
+        legacy = SANMethod(
+            SANModelConfig(),
+            {
+                name: DomainSpec(parents=torch.tensor(PARENTS[name]), num_joints=len(PARENTS[name]))
+                for name in PARENTS
+            },
+            cfg=SANConfig(),
+        )
+        with pytest.raises(ValueError, match="legacy SAN recipe"):
+            make_method().load_state_dict(legacy.state_dict())
+
+    def test_incompatible_setup_is_refused(self):
+        state = make_method().state_dict()
+        generator = torch.Generator().manual_seed(0)
+        other = {name: make_spec(PARENTS[name], 5, generator) for name in PARENTS}
+        with pytest.raises(ValueError, match="domains"):
+            make_method(other).load_state_dict(state)
+
+
+def smooth_clip(num_joints: int, offset_scale: float, seed: int) -> MotionData:
+    """ Near-rest motion, slow enough to hold contact frames. """
+    generator = torch.Generator().manual_seed(seed)
+    frames = 130
+
+    rotations = torch.zeros(frames, num_joints, 4)
+    rotations[..., 0] = 1.0
+    phase = torch.linspace(0, 6.28, frames)[:, None, None]
+    rotations = rotations + 0.01 * torch.randn(1, num_joints, 4, generator=generator) * phase.sin()
+    rotations = F.normalize(rotations, dim=-1)
+
+    offsets = offset_scale * 0.1 * torch.ones(num_joints, 3)
+    offsets[0] = 0.0
+    root = torch.linspace(0, 1, frames)[:, None] * torch.tensor([0.1, 0.0, 0.1]) + torch.tensor([0.0, 0.9, 0.0])
+
+    return MotionData(offsets=offsets, joint_rotations=rotations, fps=30.0, root_position=root)
+
+
+def write_config(path: Path, tmp_path: Path) -> Path:
+    cfg = yaml.safe_load(path.read_text())
+    cfg["device"] = "cpu"
+    cfg["trainer"].update(batch_size=2, num_epochs=1, validation_interval=1, checkpoint_interval=1, log_dir=str(tmp_path / "logs"), use_tensorboard=False, verbose=False)
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump(cfg))
+    return config
+
+
+def run_training(config: Path, monkeypatch) -> SimpleNamespace:
+    """ Runs scripts/train.py as a script, returning the method and trainer it built. """
+    captured = SimpleNamespace()
+    train = Trainer.train
+
+    def spy(self):
+        captured.method, captured.trainer = self.method, self
+        return train(self)
+
+    monkeypatch.setattr(Trainer, "train", spy)
+    monkeypatch.setattr(sys, "argv", ["train.py", "--config", str(config)])
+    runpy.run_path(str(TRAIN_SCRIPT), run_name="__main__")
+    return captured
+
+
+class TestEndToEnd:
+    def test_reference_config_reaches_the_reference_classes(self, tmp_path, monkeypatch, capsys):
+        class Source:
+            def __init__(self, name):
+                parents = {"amass": AMASS_PARENTS, "cmu": CMU_PARENTS}[name]
+                self.collection = MotionCollection(
+                    topology=SkeletonTopology(parents=torch.tensor(parents)),
+                    motions=[smooth_clip(len(parents), scale, seed) for seed, scale in enumerate((1.0, 1.0, 1.5))],
+                )
+
+            def load(self):
+                return self.collection
+
+        monkeypatch.setattr("motion_retargeting.methods.pan.data.build_adapter", Source)
+
+        run = run_training(write_config(REFERENCE_CONFIG, tmp_path), monkeypatch)
+
+        assert type(run.method) is SANReferenceMethod
+        assert isinstance(run.method.domain_specs["group_a"], SANReferenceDomainSpec)
+        assert isinstance(run.method.cfg, SANReferenceConfig)
+        assert run.method.domain_specs["group_a"].num_banks == 2
+        assert len(list(run.method.model.discriminator_parameters())) == 18
+
+        # Two clips share a bank (3 windows each) and the third has its own.
+        assert "group_a: windows per bank: least 3, median 3, most 6" in capsys.readouterr().out
+
+        checkpoint = torch.load(run.trainer.checkpoint_dir / "final.pt", weights_only=True)
+        assert checkpoint["method"]["recipe"]["recipe"] == "mixamo_reference"
+
+        gifs = list(run.trainer.visualization_dir.rglob("*.gif"))
+        assert {gif.name for gif in gifs} == {"group_a_to_group_b.gif", "group_b_to_group_a.gif"}
+
+        run.trainer.load_checkpoint(run.trainer.checkpoint_dir / "final.pt")
+
+    def test_existing_san_config_still_runs_the_legacy_method(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(base, "PATHS", SimpleNamespace(data_root=tmp_path))
+        monkeypatch.setattr(base, "label_joint_bodies", lambda topology, offsets: {
+            0: list(range(topology.num_joints // 2)),
+            1: list(range(topology.num_joints // 2, topology.num_joints)),
+        })
+
+        class Source(MotionSourceAdapter):
+            def __init__(self, name):
+                super().__init__(name)
+                self.parents = {"amass": AMASS_PARENTS, "cmu": CMU_PARENTS}[name]
+
+            def _extract(self):
+                clips = [smooth_clip(len(self.parents), 1.0, seed) for seed in range(30)]
+                return [
+                    self._construct_motion(
+                        parents=self.parents,
+                        offsets=clip.offsets,
+                        joint_rotations=clip.joint_rotations,
+                        root_position=clip.root_position,
+                        fps=clip.fps,
+                    )
+                    for clip in clips
+                ]
+
+        monkeypatch.setattr("motion_retargeting.data.factory.build_adapter", Source)
+
+        run = run_training(write_config(LEGACY_CONFIG, tmp_path), monkeypatch)
+
+        assert type(run.method) is SANMethod
+        assert run.method.cfg.recipe == "legacy"
+        assert "recipe" not in torch.load(run.trainer.checkpoint_dir / "final.pt", weights_only=True)["method"]
+
+        batch = next(iter(run.trainer.train_loader))
+        assert {"motion", "offsets", "q_heading"} <= set(batch["group_a"])
 
 
 def reached(method: SANReferenceMethod, loss: torch.Tensor) -> set:

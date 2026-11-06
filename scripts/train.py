@@ -19,8 +19,14 @@ from motion_retargeting.methods.pan.config import (
 )
 from motion_retargeting.methods.pan.data import build_reference_splits
 from motion_retargeting.methods.pan.method import PANMethod, PANReferenceMethod
-from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
-from motion_retargeting.methods.san.method import SANMethod
+from motion_retargeting.methods.san.config import (
+    DomainSpec as SANDomainSpec,
+    SANConfig,
+    SANModelConfig,
+    SANReferenceConfig,
+    SANReferenceDomainSpec,
+)
+from motion_retargeting.methods.san.method import SANMethod, SANReferenceMethod
 from motion_retargeting.training.trainer import Trainer, TrainerConfig
 from motion_retargeting.training.utils import ZippedLoaders
 
@@ -31,8 +37,11 @@ METHODS = {
     "san": (SANDomainSpec, SANModelConfig, SANConfig, SANMethod),
 }
 
-# Selected by `method.params.recipe: mixamo_reference` under method name "pan".
-PAN_REFERENCE_METHOD = (PANReferenceDomainSpec, PANReferenceModelConfig, PANReferenceConfig, PANReferenceMethod)
+# Selected by `method.params.recipe: mixamo_reference` under each method name.
+REFERENCE_METHODS = {
+    "pan": (PANReferenceDomainSpec, PANReferenceModelConfig, PANReferenceConfig, PANReferenceMethod),
+    "san": (SANReferenceDomainSpec, SANModelConfig, SANReferenceConfig, SANReferenceMethod),
+}
 
 
 parser = argparse.ArgumentParser()
@@ -47,8 +56,18 @@ args = parser.parse_args()
 
 
 def uses_reference_recipe(method_cfg: dict) -> bool:
-    """ Whether the config selects PAN's reference-Mixamo recipe; PAN stays legacy by default. """
-    return method_cfg["name"] == "pan" and (method_cfg.get("params") or {}).get("recipe") == REFERENCE_RECIPE
+    """ Whether the config selects a method's reference-Mixamo recipe; methods stay legacy by default. """
+    return method_cfg["name"] in REFERENCE_METHODS and (method_cfg.get("params") or {}).get("recipe") == REFERENCE_RECIPE
+
+
+def print_bank_sizes(train_datasets: dict, val_datasets: dict) -> None:
+    """ Windows per skeleton bank before the holdout: a thin bank's statistics describe one or two clips. """
+    for name, dataset in train_datasets.items():
+        counts = torch.cat([dataset.bank_ids, val_datasets[name].bank_ids]).bincount(minlength=dataset.num_banks)
+        print(
+            f"[ReferenceData] {name}: windows per bank: "
+            f"least {counts.min().item()}, median {counts.median().item()}, most {counts.max().item()}"
+        )
 
 
 def main():
@@ -62,6 +81,8 @@ def main():
     if uses_reference_recipe(cfg["method"]):
         # Built from the raw collections: the shared windows below have no absolute root or edges.
         train_datasets, val_datasets = build_reference_splits(cfg["dataset"])
+        if cfg["method"]["name"] == "san":
+            print_bank_sizes(train_datasets, val_datasets)
     else:
         datasets = build_datasets(cfg["dataset"])
 
@@ -109,7 +130,7 @@ def main():
     }
 
     spec_cls, model_cfg_cls, method_cfg_cls, method_cls = (
-        PAN_REFERENCE_METHOD if uses_reference_recipe(cfg["method"]) else METHODS[cfg["method"]["name"]]
+        REFERENCE_METHODS[cfg["method"]["name"]] if uses_reference_recipe(cfg["method"]) else METHODS[cfg["method"]["name"]]
     )
 
     specs = {
