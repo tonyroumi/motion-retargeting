@@ -15,6 +15,8 @@ python scripts/train.py source=<character> target=<character>
 python scripts/retarget.py --model <checkpoint> --source-skeleton <path> --target-skeleton <path> --motion <path>
 ```
 
+To train on the PAN authors' datasets (Mixamo, LAFAN1 and the dog), see [docs/author_datasets.md](docs/author_datasets.md).
+
 ## Acknowledgments
 
 This project builds on ideas and methods introduced in

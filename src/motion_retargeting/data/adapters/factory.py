@@ -10,11 +10,17 @@ from .amass import AMASSAdapter
 from .bandai import BANDAIAdapter
 from .base import MotionSourceAdapter
 from .cmu import CMUAdapter
+from .lafan1 import DogAdapter, LAFAN1Adapter
+from .mixamo import MixamoAdapter, MixamoGroupBAdapter
 
 ADAPTERS: Dict[str, Type[MotionSourceAdapter]] = {
     "amass": AMASSAdapter,
     "bandai": BANDAIAdapter,
     "cmu": CMUAdapter,
+    "mixamo_a": MixamoAdapter,
+    "mixamo_b": MixamoGroupBAdapter,
+    "lafan1": LAFAN1Adapter,
+    "dog": DogAdapter,
 }
 
 
