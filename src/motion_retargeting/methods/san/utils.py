@@ -5,7 +5,7 @@ SAN helpers: generator outputs and kinematic utilities.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple
+from typing import Dict, List, NamedTuple, Tuple
 
 import torch
 
@@ -47,6 +47,21 @@ class DomainPositions(NamedTuple):
     real: torch.Tensor              # d's input motion
     reconstruction: torch.Tensor    # d -> d
     retargeted_into: torch.Tensor   # other -> d, judged by d's discriminator
+
+
+@dataclass
+class SANReferencePairOutputs:
+    """ One source -> destination route of the reference recipe (same-domain routes included). """
+    target_ids: torch.Tensor  # [B], the destination bank each sample is retargeted onto
+    fake: torch.Tensor        # [B, T, 4E + 3], normalized with the target's statistics
+    fake_code: torch.Tensor   # fake re-encoded by the destination's motion encoder
+
+
+@dataclass
+class SANReferenceGeneratorOutputs:
+    motion_codes: Dict[str, torch.Tensor]
+    reconstructions: Dict[str, torch.Tensor]
+    pairs: Dict[Tuple[str, str], SANReferencePairOutputs]
 
 
 def split_by_domain(outputs: GeneratorOutputs) -> Dict[str, DomainOutputs]:

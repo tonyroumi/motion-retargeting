@@ -17,7 +17,7 @@ from motion_retargeting.modules.encoders import SkeletalEncoder
 from motion_retargeting.modules.skeletal import construct_adj
 
 from .config import DomainSpec, SANModelConfig, SANReferenceDomainSpec
-from .utils import GeneratorOutputs
+from .utils import GeneratorOutputs, SANReferenceGeneratorOutputs, SANReferencePairOutputs, select_banks
 
 # Offsets come in meters, while SkeletalConv's static branch (scaled by 1/100) expects centimeters.
 METERS_TO_CENTIMETERS = 100.0
@@ -226,3 +226,61 @@ class SANReferenceDomain(nn.Module):
     def discriminate(self, bones: torch.Tensor) -> torch.Tensor:
         """ bones: [B, T, J, 3], in metres with no global row -> realism scores. BatchNorm removes the unit. """
         return self.discriminator(bones.flatten(2))
+
+
+class SANReferenceModel(nn.Module):
+    """
+    One `SANReferenceDomain` per motion domain, keyed by the dataset group name. The specs' six validated
+    chains are what give every domain the same 7 primal tokens.
+    """
+
+    def __init__(self, cfg: SANModelConfig, domain_specs: Dict[str, SANReferenceDomainSpec]):
+        super().__init__()
+
+        self.cfg = cfg
+        self.specs = domain_specs
+        self.domains = nn.ModuleDict(
+            {name: SANReferenceDomain(cfg, spec) for name, spec in domain_specs.items()}
+        )
+
+    def forward_generator(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> SANReferenceGeneratorOutputs:
+        """
+        batch: {domain: {"motion": [B, T, 4E + 3], "bank_id": [B]}}
+
+        Reconstructs every domain on its own banks, then runs all four source -> destination routes, each
+        with a uniformly drawn target bank per sample, independently of how many windows a bank has. A
+        same-domain route uses its drawn bank too, not the source's. Nothing is decoded back to the source:
+        SAN has no motion cycle.
+        """
+        static = {name: domain.encode_offsets() for name, domain in self.domains.items()}
+
+        motion_codes, reconstructions = {}, {}
+        for name, domain in self.domains.items():
+            source_static = select_banks(static[name], batch[name]["bank_id"])
+            motion_codes[name] = domain.encode(batch[name]["motion"], source_static)
+            reconstructions[name] = domain.decode(motion_codes[name], source_static)
+
+        pairs = {}
+        for source, motion_code in motion_codes.items():
+            for destination, domain in self.domains.items():
+                target_ids = torch.randint(domain.offsets.shape[0], (motion_code.shape[0],), device=motion_code.device)
+                target_static = select_banks(static[destination], target_ids)
+
+                fake = domain.decode(motion_code, target_static)
+                pairs[(source, destination)] = SANReferencePairOutputs(
+                    target_ids=target_ids,
+                    fake=fake,
+                    fake_code=domain.encode(fake, target_static),
+                )
+
+        return SANReferenceGeneratorOutputs(motion_codes=motion_codes, reconstructions=reconstructions, pairs=pairs)
+
+    def generator_parameters(self) -> Iterator[nn.Parameter]:
+        for domain in self.domains.values():
+            yield from domain.motion_encoder.parameters()
+            yield from domain.offset_encoder.parameters()
+            yield from domain.decoder.parameters()
+
+    def discriminator_parameters(self) -> Iterator[nn.Parameter]:
+        for domain in self.domains.values():
+            yield from domain.discriminator.parameters()
