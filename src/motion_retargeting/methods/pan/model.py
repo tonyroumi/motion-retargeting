@@ -38,22 +38,22 @@ class PANDomain(nn.Module):
         self.fk = EdgeForwardKinematics(spec.parents.tolist())
         self.ee_ids = spec.ee_ids
 
-        chains = spec.chains
-        conv_mask = temporal_conv_mask(chains, spec.num_tokens)
+        parts = spec.parts
+        conv_mask = temporal_conv_mask(parts, spec.num_tokens)
         part_dim = cfg.motion_encoder.embed_dim
 
         part_connectivity = parts_to_parts(spec.num_parts, part_dim, part_dim)
 
         self.motion_encoder = MotionEncoder(
             num_parts=spec.num_parts,
-            attention_mask=attention_mask(chains, spec.num_tokens),
+            attention_mask=attention_mask(parts, spec.num_tokens),
             shortcut_connectivity=tokens_to_parts(conv_mask, 4, part_dim),
             part_connectivity=part_connectivity,
             **asdict(cfg.motion_encoder),
         )
         self.body_part_encoder = BodyPartEncoder(
             num_parts=spec.num_parts,
-            input_connectivity=tokens_to_parts(skeleton_offset_mask(chains, spec.num_joints), 3, part_dim),
+            input_connectivity=tokens_to_parts(skeleton_offset_mask(parts, spec.num_joints), 3, part_dim),
             part_connectivity=part_connectivity,
         )
         self.decoder = MotionDecoder(

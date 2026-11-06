@@ -13,7 +13,6 @@ from torch import nn
 
 from motion_retargeting.methods.pan.masks import (
     attention_mask,
-    humanoid_chains,
     parts_to_parts,
     parts_to_tokens,
     skeleton_offset_mask,
@@ -24,7 +23,7 @@ from motion_retargeting.methods.pan.losses import discriminator_loss, generator_
 from motion_retargeting.modules.decoders import MotionDecoder
 from motion_retargeting.modules.discriminators import MotionDiscriminator
 from motion_retargeting.modules.encoders import BodyPartEncoder, MotionEncoder, MotionEncoderConfig
-from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, load_reference, local_parents, on_cpu, reference_edges, requires_reference
+from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, labeled, load_reference, on_cpu, reference_edges, requires_reference
 
 NUM_PARTS = 6
 PART_DIM = 32
@@ -34,11 +33,11 @@ FIXTURES = pytest.mark.parametrize("topology", [FIXTURE_23, FIXTURE_28], ids=["2
 
 def make_encoder(topology=FIXTURE_23) -> MotionEncoder:
     num_tokens = len(topology)
-    chains = humanoid_chains(local_parents(topology))
-    conv = temporal_conv_mask(chains, num_tokens)
+    parts = labeled(topology)
+    conv = temporal_conv_mask(parts, num_tokens)
     return MotionEncoder(
         num_parts=NUM_PARTS,
-        attention_mask=attention_mask(chains, num_tokens),
+        attention_mask=attention_mask(parts, num_tokens),
         shortcut_connectivity=tokens_to_parts(conv, 4, PART_DIM),
         part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
         **asdict(MotionEncoderConfig()),
@@ -46,16 +45,16 @@ def make_encoder(topology=FIXTURE_23) -> MotionEncoder:
 
 
 def make_skeleton_encoder(topology=FIXTURE_23) -> BodyPartEncoder:
-    chains = humanoid_chains(local_parents(topology))
+    parts = labeled(topology)
     return BodyPartEncoder(
         num_parts=NUM_PARTS,
-        input_connectivity=tokens_to_parts(skeleton_offset_mask(chains, len(topology)), 3, PART_DIM),
+        input_connectivity=tokens_to_parts(skeleton_offset_mask(parts, len(topology)), 3, PART_DIM),
         part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
     )
 
 
 def make_decoder(topology=FIXTURE_23) -> MotionDecoder:
-    conv = temporal_conv_mask(humanoid_chains(local_parents(topology)), len(topology))
+    conv = temporal_conv_mask(labeled(topology), len(topology))
     return MotionDecoder(
         part_connectivity=parts_to_parts(NUM_PARTS, PART_DIM, PART_DIM),
         output_connectivity=parts_to_tokens(conv, PART_DIM, 4),
@@ -231,7 +230,7 @@ class TestSkeletonEncoder:
         offsets = torch.randn(1, 23, 3).requires_grad_(True)
         code = encoder(offsets)
 
-        mask = skeleton_offset_mask(humanoid_chains(local_parents(FIXTURE_23)), 23)
+        mask = skeleton_offset_mask(labeled(FIXTURE_23), 23)
         for part in range(NUM_PARTS):
             grad = torch.autograd.grad(code[:, part].sum(), offsets, retain_graph=True)[0]
             read = grad[0].abs().sum(dim=-1) > 0
@@ -288,7 +287,7 @@ class TestDecoder:
 
     def test_forbidden_part_to_output_gradients_are_exactly_zero(self):
         decoder = make_decoder().eval()
-        conv = temporal_conv_mask(humanoid_chains(local_parents(FIXTURE_23)), 23)
+        conv = temporal_conv_mask(labeled(FIXTURE_23), 23)
         code = torch.randn(1, 16, NUM_PARTS, PART_DIM).requires_grad_(True)
         output = decoder(code)
 
@@ -307,7 +306,7 @@ class TestDecoder:
             grad = torch.autograd.grad(output[:, :, channels].sum(), code, retain_graph=True)[0]
             return (grad.abs().sum(dim=(0, 1, 3)) > 0).nonzero().flatten().tolist()
 
-        assert read_by(slice(10 * 4, 11 * 4)) == [2, 3, 4, 5]  # Shared branch edge.
+        assert read_by(slice(10 * 4, 11 * 4)) == [2]  # The spine's last edge, which labeled parts do not share.
         assert read_by(slice(21 * 4, 22 * 4)) == list(range(NUM_PARTS))  # Unowned after double conversion.
         assert read_by(slice(-3, None)) == list(range(NUM_PARTS))  # Root channels.
 

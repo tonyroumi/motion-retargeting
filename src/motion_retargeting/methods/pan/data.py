@@ -79,6 +79,7 @@ class PANMotionDataset(Dataset):
         mean: torch.Tensor,
         std: torch.Tensor,
         parents: torch.Tensor,
+        body_joints: Dict[int, List[int]],
         augment: bool = False,
     ):
         self.motion = motion  # [N, W, 4E + 3], un-normalized
@@ -87,6 +88,7 @@ class PANMotionDataset(Dataset):
         self.mean = mean  # [K, 4E + 3]
         self.std = std  # [K, 4E + 3]
         self.parents = parents  # [J]
+        self.body_joints = body_joints  # manually labeled body parts: {part: [joints]}
         self.augment = augment
 
     @property
@@ -102,6 +104,7 @@ class PANMotionDataset(Dataset):
             mean=self.mean,
             std=self.std,
             parents=self.parents,
+            body_joints=self.body_joints,
             augment=augment,
         )
 
@@ -134,9 +137,12 @@ def fit_statistics(motion: torch.Tensor, bank_ids: torch.Tensor, num_banks: int)
 def build_from_collections(collections: List[MotionCollection], config: PANDataConfig) -> PANMotionDataset:
     """ Windows, skeleton banks and statistics of one domain; every collection shares one topology. """
     parents = collections[0].topology.parents
+    body_joints = collections[0].topology.body_joints
     for collection in collections[1:]:
         if not torch.equal(collection.topology.parents, parents):
             raise ValueError("All sources in a group must share one skeleton topology")
+        if collection.topology.body_joints != body_joints:
+            raise ValueError("All sources in a group must share one set of labeled body parts")
 
     windows: List[torch.Tensor] = []
     bank_ids: List[int] = []
@@ -178,6 +184,7 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
         mean=mean,
         std=std,
         parents=parents,
+        body_joints=body_joints,
     )
 
 

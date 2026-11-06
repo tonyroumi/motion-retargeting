@@ -16,8 +16,7 @@ from motion_retargeting.methods.pan.kinematics import (
     end_effector_velocity,
     path_heights,
 )
-from motion_retargeting.methods.pan.masks import humanoid_chains
-from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, load_reference, local_parents, reference_edges, requires_reference
+from pan_reference_support import ARGS, FIXTURE_23, FIXTURE_28, labeled, load_reference, local_parents, reference_edges, requires_reference
 
 # Root branching into 1 and 3; joint 1 continues to 2.
 PARENTS = [-1, 0, 1, 0]
@@ -91,8 +90,7 @@ class TestClosedForm:
 
 class TestEndEffectors:
     def test_order_and_velocity(self):
-        chains = humanoid_chains(local_parents(FIXTURE_23))
-        assert end_effector_ids(chains) == [4, 8, 14, 18, 22]
+        assert end_effector_ids(labeled(FIXTURE_23)) == [4, 8, 14, 18, 22]
 
         world = torch.zeros(1, 3, 23, 3)
         world[:, 1, 4, 0] = 2.0
@@ -101,25 +99,23 @@ class TestEndEffectors:
         assert velocity[0, 0, 0, 0] == 20.0 and velocity[0, 1, 0, 0] == -20.0
 
     def test_configured_sources(self):
-        amass = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
-        assert end_effector_ids(humanoid_chains(amass)) == [10, 11, 15, 20, 21]
+        amass = [[1, 4, 7, 10], [2, 5, 8, 11], [0, 3, 6, 9], [12, 15], [13, 16, 18, 20], [14, 17, 19, 21]]
+        assert end_effector_ids(amass) == [10, 11, 15, 20, 21]
 
 
 class TestHeights:
     def test_path_sum_not_bounding_box(self):
         parents = local_parents(FIXTURE_23).tolist()
-        chains = humanoid_chains(parents)
 
         # Unit bones all along +X: the vertical extent is zero and so is any Y bounding box.
         offsets = torch.zeros(1, 23, 3)
         offsets[:, 1:, 0] = 1.0
-        assert path_heights(offsets, parents, chains).item() == pytest.approx(4 + 6)
+        assert path_heights(offsets, parents, labeled(FIXTURE_23)).item() == pytest.approx(4 + 6)
 
     def test_scales_with_geometry_per_bank(self):
         parents = local_parents(FIXTURE_23).tolist()
-        chains = humanoid_chains(parents)
         offsets = torch.randn(1, 23, 3)
-        heights = path_heights(torch.cat([offsets, 2 * offsets]), parents, chains)
+        heights = path_heights(torch.cat([offsets, 2 * offsets]), parents, labeled(FIXTURE_23))
         assert heights[1] == pytest.approx(2 * heights[0].item())
 
 
@@ -151,8 +147,7 @@ class TestAgainstReference:
             rtol=1e-4,
         )
 
-        chains = humanoid_chains(local_parents(topology))
-        ee_ids = end_effector_ids(chains)
+        ee_ids = end_effector_ids(labeled(topology))
 
         positions = reference.get_ee(remote_bones, list(topology), list(range(num_joints)), velo=False, from_root=True)
         assert torch.allclose(fk.world_positions(bones), positions, atol=1e-5, rtol=1e-4)

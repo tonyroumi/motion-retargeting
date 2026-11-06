@@ -33,7 +33,7 @@ from motion_retargeting.methods.pan.method import PANMethod
 from motion_retargeting.methods.pan.utils import mpjpe, squared_error_over_height2
 from motion_retargeting.modules import decoders, discriminators, encoders
 from motion_retargeting.training.trainer import Trainer
-from pan_reference_support import ARGS, load_reference, requires_reference
+from pan_reference_support import AMASS_BODY_JOINTS, ARGS, CMU_BODY_JOINTS, load_reference, requires_reference
 
 ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = ROOT / "scripts" / "train.py"
@@ -47,9 +47,10 @@ BATCH_SIZE = 4
 WINDOW = 64
 NUM_BANKS = {"group_a": 3, "group_b": 2}
 PARENTS = {"group_a": AMASS_PARENTS, "group_b": CMU_PARENTS}
+BODY_JOINTS = {"group_a": AMASS_BODY_JOINTS, "group_b": CMU_BODY_JOINTS}
 
 
-def make_spec(parents, num_banks: int, generator: torch.Generator) -> DomainSpec:
+def make_spec(parents, body_joints, num_banks: int, generator: torch.Generator) -> DomainSpec:
     num_joints = len(parents)
     channels = 4 * (num_joints - 1) + 3
 
@@ -62,12 +63,12 @@ def make_spec(parents, num_banks: int, generator: torch.Generator) -> DomainSpec
     # Small enough that an untrained decoder's generated velocities include contact frames.
     std = 0.001 + 0.002 * torch.rand(num_banks, channels, generator=generator)
 
-    return DomainSpec(parents=torch.tensor(parents), offsets=offsets, mean=mean, std=std)
+    return DomainSpec(parents=torch.tensor(parents), offsets=offsets, mean=mean, std=std, body_joints=body_joints)
 
 
 def make_specs(seed: int = 0):
     generator = torch.Generator().manual_seed(seed)
-    return {name: make_spec(PARENTS[name], NUM_BANKS[name], generator) for name in PARENTS}
+    return {name: make_spec(PARENTS[name], BODY_JOINTS[name], NUM_BANKS[name], generator) for name in PARENTS}
 
 
 def make_batch(specs, batch_size: int = BATCH_SIZE, window: int = WINDOW, seed: int = 1):
@@ -327,7 +328,9 @@ class TestObjective:
             mean, std = spec.mean.clone(), spec.std.clone()
             mean[:, -3:] *= 2
             std[:, -3:] *= 2
-            scaled[name] = DomainSpec(parents=spec.parents, offsets=2 * spec.offsets, mean=mean, std=std)
+            scaled[name] = DomainSpec(
+                parents=spec.parents, offsets=2 * spec.offsets, mean=mean, std=std, body_joints=spec.body_joints
+            )
 
         original = make_method(specs)
         doubled = make_method(scaled)
@@ -671,9 +674,21 @@ class TestCheckpoints:
 
         generator = torch.Generator().manual_seed(0)
         other_banks = make_specs()
-        other_banks["group_a"] = make_spec(AMASS_PARENTS, NUM_BANKS["group_a"] + 1, generator)
+        other_banks["group_a"] = make_spec(AMASS_PARENTS, AMASS_BODY_JOINTS, NUM_BANKS["group_a"] + 1, generator)
         with pytest.raises(ValueError, match="domains"):
             make_method(other_banks).load_state_dict(method.state_dict())
+
+    def test_other_body_part_labels_are_rejected(self):
+        method = make_method()
+        relabeled = make_specs()
+        spec = relabeled["group_a"]
+        # The same topology, with the labels of the head and the left arm swapped.
+        body_joints = {**spec.body_joints, 3: spec.body_joints[4], 4: spec.body_joints[3]}
+        relabeled["group_a"] = DomainSpec(
+            parents=spec.parents, offsets=spec.offsets, mean=spec.mean, std=spec.std, body_joints=body_joints
+        )
+        with pytest.raises(ValueError, match="domains"):
+            make_method(relabeled).load_state_dict(method.state_dict())
 
 
 class TestConfig:
@@ -757,8 +772,9 @@ class TestEndToEnd:
         class Source:
             def __init__(self, name):
                 parents = {"amass": AMASS_PARENTS, "cmu": CMU_PARENTS}[name]
+                body_joints = {"amass": AMASS_BODY_JOINTS, "cmu": CMU_BODY_JOINTS}[name]
                 self.collection = MotionCollection(
-                    topology=SkeletonTopology(parents=torch.tensor(parents)),
+                    topology=SkeletonTopology(parents=torch.tensor(parents), body_joints=body_joints),
                     motions=[smooth_clip(len(parents), scale, seed) for seed, scale in enumerate((1.0, 1.0, 1.5))],
                 )
 
@@ -771,6 +787,8 @@ class TestEndToEnd:
 
         assert type(run.method) is PANMethod
         assert run.method.domain_specs["group_a"].num_banks == 2
+        assert run.method.domain_specs["group_a"].body_joints == AMASS_BODY_JOINTS
+        assert run.method.domain_specs["group_b"].body_joints == CMU_BODY_JOINTS
 
         checkpoint = torch.load(run.trainer.checkpoint_dir / "final.pt", weights_only=True)
         assert checkpoint["method"]["metadata"]["official_commit"] == pan_method.OFFICIAL_COMMIT

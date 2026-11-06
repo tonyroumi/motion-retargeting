@@ -37,10 +37,12 @@ dataset:
     sources: [mixamo_b]
 ```
 
-and keep the rest of the file. Both methods follow the official Mixamo path, so they need the six-chain humanoid topology
-(`humanoid_chains` in `methods/pan/masks.py` and `methods/san/kinematics.py`). `mixamo_a`, `mixamo_b` and `lafan1` have it.
-**The dog does not: its tail makes a seventh chain, so both methods refuse that skeleton with an error.** PAN's official
-LAFAN1/dog path is a different computation and is not implemented here. The `lafan1` and `dog` loaders still load their clips,
+and keep the rest of the file. Both methods follow the official Mixamo path. SAN needs the six-chain humanoid topology (`humanoid_chains` in
+`methods/san/kinematics.py`); `mixamo_a`, `mixamo_b` and `lafan1` have it. **The dog does not: its tail makes a seventh
+chain, so SAN refuses that skeleton with an error.** PAN takes its six body parts from the topology's manually labeled
+`body_joints` (left leg, right leg, spine, head, left arm, right arm, keys 0 to 5), so it needs a source labeled that way:
+`mixamo_a` and `mixamo_b` are, while the `lafan1` and `dog` adapters label three parts and PAN refuses them with an error.
+PAN's official LAFAN1/dog path is a different computation and is not implemented here. The `lafan1` and `dog` loaders still load their clips,
 and the shared builder can still window them.
 
 ## What the adapters do

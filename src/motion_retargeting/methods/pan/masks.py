@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import torch
 
@@ -9,74 +9,38 @@ NUM_PARTS = 6
 BLOCKED = -1e20
 
 
-def topology_chains(parents: Sequence[int]) -> List[List[int]]:
+def labeled_parts(body_joints: Optional[Dict[int, List[int]]], num_joints: int) -> List[List[int]]:
     """
-    Joint chains in the official code's traversal order: depth-first from the root, children ascending,
-    starting a new chain at each branching non-root joint. Parents come before children.
+    The topology's manually labeled body parts as joint lists, ordered by key: left leg, right leg,
+    spine, head, left arm, right arm. The labels must assign every joint to exactly one non-empty part.
     """
-    # parents = [int(parent) for parent in parents]
-    children: List[List[int]] = [[] for _ in parents]
-    for child, parent in enumerate(parents[1:], start=1):
-        children[parent].append(child)
+    if body_joints is None or sorted(body_joints) != list(range(NUM_PARTS)):
+        raise ValueError(f"PAN needs {NUM_PARTS} labeled body parts keyed 0 to {NUM_PARTS - 1}, got {body_joints}")
 
-    chains: List[List[int]] = []
-
-    def walk(joint: int, chain: List[int]) -> None:
-        if joint != 0 and len(children[joint]) > 1:
-            chains.append(chain)
-            chain = [joint]
-        if not children[joint]:
-            chains.append(chain)
-        for child in children[joint]:
-            walk(child, chain + [child])
-
-    walk(0, [0])
-    return chains
+    parts = [[int(joint) for joint in body_joints[key]] for key in range(NUM_PARTS)]
+    if not all(parts) or sorted(joint for part in parts for joint in part) != list(range(num_joints)):
+        raise ValueError(f"Labeled body parts must assign each of the {num_joints} joints to exactly one non-empty part: {parts}")
+    return parts
 
 
-def humanoid_chains(parents: Sequence[int]) -> List[List[int]]:
-    """
-    `topology_chains`, validated to be left leg, right leg, spine, head, left arm, right arm: two legs
-    and a spine leaving the root, then three limbs leaving the spine's end. This checks structure only;
-    that the first leg and arm are the left ones comes from the adapters' child order.
-    """
-    parents = [int(parent) for parent in parents]
-    if parents[0] != -1 or any(not 0 <= parent < child for child, parent in enumerate(parents[1:], start=1)):
-        raise ValueError(f"Expected the root first and parents before children, got {parents}")
-
-    chains = topology_chains(parents)
-    if len(chains) != NUM_PARTS:
-        raise ValueError(f"PAN needs {NUM_PARTS} body parts, this topology has {len(chains)}: {chains}")
-
-    leaves = set(range(len(parents))) - set(parents)
-    left_leg, right_leg, spine, head, left_arm, right_arm = chains
-    if (
-        any(chain[0] != 0 for chain in (left_leg, right_leg, spine))
-        or any(chain[0] != spine[-1] for chain in (head, left_arm, right_arm))
-        or any(chain[-1] not in leaves for chain in (left_leg, right_leg, head, left_arm, right_arm))
-    ):
-        raise ValueError(f"Chains do not match legs, spine, head and arms in order: {chains}")
-    return chains
+def fresh_parts(parts: Sequence[Sequence[int]]) -> List[List[int]]:
+    """ Joint parts as edge indices: drop a leading root joint, then edge = joint - 1. """
+    return [[joint - 1 for joint in (part[1:] if part[0] == 0 else part)] for part in parts]
 
 
-def fresh_parts(chains: Sequence[Sequence[int]]) -> List[List[int]]:
-    """ Chains as edge indices: drop a leading root joint, then edge = joint - 1. """
-    return [[joint - 1 for joint in (chain[1:] if chain[0] == 0 else chain)] for chain in chains]
-
-
-def double_converted_parts(chains: Sequence[Sequence[int]]) -> List[List[int]]:
+def double_converted_parts(parts: Sequence[Sequence[int]]) -> List[List[int]]:
     """ The official code's second conversion, applied to `fresh_parts` as if they were joints. """
-    return fresh_parts(fresh_parts(chains))
+    return fresh_parts(fresh_parts(parts))
 
 
-def attention_mask(chains: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
+def attention_mask(joint_parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
     """
     Additive mask [P + num_tokens, P + num_tokens], rows querying columns. A part token reads its own
-    members; a member reads the members of every part it belongs to, so a shared branch token relays
-    across parts; and every query reads the root token, which itself reads only itself. Member tokens
+    members; a member reads the members of every part it belongs to, so a token shared by several parts
+    relays across them; and every query reads the root token, which itself reads only itself. Member tokens
     never read part tokens.
     """
-    parts = fresh_parts(chains)
+    parts = fresh_parts(joint_parts)
     num_parts = len(parts)
     size = num_parts + num_tokens
 
@@ -101,14 +65,14 @@ def part_token_mask(parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Te
     return mask
 
 
-def temporal_conv_mask(chains: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
+def temporal_conv_mask(joint_parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
     """ `part_token_mask` of the encoder shortcut and final decoder layer (double converted). """
-    return part_token_mask(double_converted_parts(chains), num_tokens)
+    return part_token_mask(double_converted_parts(joint_parts), num_tokens)
 
 
-def skeleton_offset_mask(chains: Sequence[Sequence[int]], num_joints: int) -> torch.Tensor:
+def skeleton_offset_mask(joint_parts: Sequence[Sequence[int]], num_joints: int) -> torch.Tensor:
     """ `part_token_mask` of the skeleton encoder's first layer, read against joint offsets. """
-    return part_token_mask(fresh_parts(chains), num_joints)
+    return part_token_mask(fresh_parts(joint_parts), num_joints)
 
 
 def tokens_to_parts(mask: torch.Tensor, channels_per_token: int, channels_per_part: int) -> torch.Tensor:
