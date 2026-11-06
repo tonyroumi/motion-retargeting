@@ -20,7 +20,7 @@ import torch
 
 from motion_retargeting.kinematics.quaternions import quat_apply, quat_mul, quat_normalize
 
-# The official code's scale on end-effector frame displacement.
+
 END_EFFECTOR_VELOCITY_SCALE = 10.0
 
 

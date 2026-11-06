@@ -6,19 +6,19 @@ import yaml
 import torch
 from torch.utils.data import DataLoader, RandomSampler, Subset
 
-from motion_retargeting.methods.pan.config import DomainSpec, PANConfig, PANModelConfig
-from motion_retargeting.methods.pan.data import build_splits as build_pan_splits
+from motion_retargeting.methods.pan.config import DomainSpec as PANDomainSpec, PANConfig, PANModelConfig
+from motion_retargeting.methods.pan.data import build_pan_splits
 from motion_retargeting.methods.pan.method import PANMethod
 from motion_retargeting.methods.san.config import DomainSpec as SANDomainSpec, SANConfig, SANModelConfig
 from motion_retargeting.methods.san.data import build_san_splits
 from motion_retargeting.methods.san.method import SANMethod
+
 from motion_retargeting.training.trainer import Trainer, TrainerConfig
 from motion_retargeting.training.utils import ZippedLoaders
 
 
-# method name -> (domain spec, model config, method config, method) classes, and its dataset splits
 METHODS = {
-    "pan": (DomainSpec, PANModelConfig, PANConfig, PANMethod, build_pan_splits),
+    "pan": (PANDomainSpec, PANModelConfig, PANConfig, PANMethod, build_pan_splits),
     "san": (SANDomainSpec, SANModelConfig, SANConfig, SANMethod, build_san_splits),
 }
 
@@ -44,7 +44,6 @@ def main():
 
     spec_cls, model_cfg_cls, method_cfg_cls, method_cls, build_splits = METHODS[cfg["method"]["name"]]
 
-    # Built from the raw collections: each method reads edge rotations and the absolute root.
     train_datasets, val_datasets = build_splits(cfg["dataset"])
 
     # Draw the same number of samples from every domain each epoch (a fresh random subset
@@ -60,7 +59,6 @@ def main():
         for name, dataset in train_datasets.items()
     }
 
-    # Validation: the same fixed, equally sized, unshuffled windows from every domain.
     num_val_samples = min(len(dataset) for dataset in val_datasets.values())
     val_loaders = {
         name: DataLoader(

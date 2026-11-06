@@ -196,7 +196,7 @@ def split_holdout(dataset: PANMotionDataset, holdout_percent: int = 5) -> Tuple[
     )
 
 
-def build_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDataset], Dict[str, PANMotionDataset]]:
+def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDataset], Dict[str, PANMotionDataset]]:
     """ {domain: train}, {domain: holdout} from the `dataset` section of the config. """
     train_datasets, holdout_datasets = {}, {}
     for name, group_cfg in dataset_cfg.items():

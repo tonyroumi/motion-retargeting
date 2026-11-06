@@ -14,7 +14,6 @@ from motion_retargeting.data.visualization.visualize import visualize_motion
 from .config import DomainSpec, PANConfig, PANModelConfig
 from .kinematics import end_effector_velocity
 from .losses import discriminator_loss, end_effector_terms, generator_adversarial_loss
-from .masks import MASK_VERSION
 from .model import PANModel
 from .utils import (
     ForwardState,
@@ -368,7 +367,6 @@ class PANMethod(RetargetingMethod):
             "representation": "edge_parent_quaternions_absolute_root_xyz",
             "physical_units": "metres",
             "normalization_scope": "per_skeleton_bank_all_channels_before_holdout",
-            "mask_version": MASK_VERSION,
             "domains": {
                 name: {
                     "parents": spec.parents.tolist(),

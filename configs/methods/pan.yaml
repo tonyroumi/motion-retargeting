@@ -1,12 +1,3 @@
-# PAN, running the official code's Mixamo computation on the sources below (see README, "PAN"):
-# edge rotations with heading kept, absolute root, all-channel per-bank statistics, masked networks,
-# the official objective and generator-then-discriminator updates.
-#
-# Deviations from the original Mixamo assets:
-#   - Skeleton banks: clips with exactly equal offsets stand in for Mixamo characters.
-#   - Statistics are fit per bank before the holdout, as the official code does, so the holdout is a
-#     reproduction diagnostic and not clean evidence of generalization.
-#   - Frames are resampled to target_fps on a timestamp grid, not with Mixamo's literal ::2.
 device: cuda
 
 dataset:
@@ -56,7 +47,6 @@ method:
     replay_buffer_size: 50
     swap_probability: 0.5
 
-    # Objective (README, "PAN"): domain and pair aggregations are sums
     reconstruction_lambda: 1
     root_lambda: 100
     position_lambda: 100
@@ -69,7 +59,6 @@ method:
     # Log each loss term's gradient norm every N train steps (0 disables)
     loss_grad_norm_interval: 50
 
-# Published Mixamo command: Adam(0.9, 0.999), no schedule, weight decay or gradient clipping.
 trainer:
   batch_size: 128
   learning_rate: 0.001

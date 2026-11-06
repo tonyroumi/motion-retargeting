@@ -1,10 +1,3 @@
-# SAN, computing what the official code does (DeepMotionEditing/deep-motion-editing at 74fff8f) on the
-# AMASS / CMU sources. See the README for what that does not reproduce.
-#
-#   - Skeleton banks: clips with exactly equal offsets stand in for Mixamo characters.
-#   - Statistics are fit per bank before the holdout, as the official code does, so the holdout is a
-#     reproduction diagnostic and not clean evidence of generalization.
-#   - Frames are resampled to target_fps on a timestamp grid, not with Mixamo's literal ::2.
 device: cuda
 
 dataset:

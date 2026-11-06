@@ -1,27 +1,8 @@
-"""
-PAN's numerical body-part masks, following the official Mixamo path at its pinned commit.
-
-Token layout: edge i is the edge whose child is joint i + 1, and the final token is the root-position
-token, so a skeleton of J joints has J tokens (J - 1 edges + root). Attention prepends one token per
-part in front of those.
-
-Two quirks of the official code are reproduced on purpose. Neither is scientifically intended:
-  - Temporal conv masks are "double converted". The official code runs its joint -> edge conversion twice
-    on the same mutated lists, shifting every part after the first conversion by one more index.
-  - Skeleton-encoder masks hold edge indices but select from a flattened *joint* offset tensor, and
-    their always-on last column reads the last joint, not the root.
-
-Nothing here mutates the caller's topology.
-"""
-
 from __future__ import annotations
 
 from typing import List, Sequence
 
 import torch
-
-# Identifies these masks in checkpoints; changing the numbers below must change this too.
-MASK_VERSION = "official_head_double_converted_v1"
 
 NUM_PARTS = 6
 # Additive attention weight of a blocked token pair, as in the official code.
@@ -33,7 +14,7 @@ def topology_chains(parents: Sequence[int]) -> List[List[int]]:
     Joint chains in the official code's traversal order: depth-first from the root, children ascending,
     starting a new chain at each branching non-root joint. Parents come before children.
     """
-    parents = [int(parent) for parent in parents]
+    # parents = [int(parent) for parent in parents]
     children: List[List[int]] = [[] for _ in parents]
     for child, parent in enumerate(parents[1:], start=1):
         children[parent].append(child)
