@@ -13,14 +13,19 @@ from torch import nn
 
 from motion_retargeting.kinematics import ForwardKinematics
 from motion_retargeting.methods.base import RetargetingMethod
+from motion_retargeting.methods.pan.kinematics import end_effector_velocity as scaled_end_effector_velocity
+from motion_retargeting.methods.pan.losses import reference_end_effector_terms
+from motion_retargeting.methods.pan.utils import ReferenceSourceState
 from motion_retargeting.resources.replay_buffer import ReplayBuffer
 
-from .config import DomainSpec, SANConfig, SANModelConfig
+from .config import DomainSpec, SANConfig, SANModelConfig, SANReferenceConfig, SANReferenceDomainSpec
 from .losses import adversarial_loss, end_effector_loss, generator_adversarial_loss
-from .model import SANModel
+from .model import SANModel, SANReferenceModel
 from .utils import (
     DomainPositions,
     GeneratorOutputs,
+    SANReferenceForwardState,
+    SANReferencePairState,
     denormalize,
     end_effector_velocity,
     mpjpe,
@@ -372,3 +377,159 @@ class SANMethod(RetargetingMethod):
         self.model.load_state_dict(state_dict["model"])
         self.generator_optimizer.load_state_dict(state_dict["generator_optimizer"])
         self.discriminator_optimizer.load_state_dict(state_dict["discriminator_optimizer"])
+
+
+class SANReferenceMethod(SANMethod):
+    """
+    SAN's reference recipe: edge rotations and absolute root in, the reference's token graph, bone-space
+    discriminators, and the reference objective and update order. Shares only the gradient diagnostics
+    with the legacy recipe.
+    """
+
+    def __init__(
+        self,
+        model_cfg: SANModelConfig,
+        domain_specs: Dict[str, SANReferenceDomainSpec],
+        learning_rate: float = 2e-4,
+        device: str | torch.device = "cpu",
+        cfg: SANReferenceConfig | None = None,
+    ):
+        RetargetingMethod.__init__(self)
+
+        self.model_cfg = model_cfg
+        self.cfg = cfg if cfg is not None else SANReferenceConfig()
+        self.domain_specs = domain_specs
+
+        self.device = torch.device(device)
+
+        self.model = SANReferenceModel(model_cfg, domain_specs).to(self.device)
+
+        self.generator_optimizer = torch.optim.Adam(
+            self.model.generator_parameters(), lr=learning_rate, betas=(0.9, 0.999)
+        )
+        self.discriminator_optimizer = torch.optim.Adam(
+            self.model.discriminator_parameters(), lr=learning_rate, betas=(0.9, 0.999)
+        )
+
+        self.buffers = {
+            domain: ReplayBuffer(self.cfg.replay_buffer_size, self.cfg.swap_probability)
+            for domain in self.domain_specs
+        }
+
+        self.num_steps = 0
+
+    def forward_state(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> SANReferenceForwardState:
+        """ One generator forward, with each route's FK on the bank that route's statistics belong to. """
+        outputs = self.model.forward_generator(batch)
+        domains = self.model.domains
+
+        sources = {}
+        for name, domain in domains.items():
+            bank_ids, motion = batch[name]["bank_id"], batch[name]["motion"]
+            reconstruction = outputs.reconstructions[name]
+            sources[name] = ReferenceSourceState(
+                bank_ids=bank_ids,
+                motion=motion,
+                denormalized=domain.denormalize(motion, bank_ids),
+                bones=domain.bones(motion, bank_ids).detach(),
+                reconstruction=reconstruction,
+                reconstruction_denormalized=domain.denormalize(reconstruction, bank_ids),
+                reconstruction_bones=domain.bones(reconstruction, bank_ids),
+            )
+
+        pairs = {}
+        for (source, destination), pair in outputs.pairs.items():
+            fake_bones = domains[destination].bones(pair.fake, pair.target_ids)
+            pairs[(source, destination)] = SANReferencePairState(
+                target_ids=pair.target_ids,
+                fake_bones=fake_bones,
+                fake_velocity=self.normalized_end_effector_velocity(destination, fake_bones, pair.target_ids),
+            )
+
+        return SANReferenceForwardState(outputs=outputs, sources=sources, pairs=pairs)
+
+    def normalized_positions(self, domain: str, bones: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
+        """ Root-relative positions with the absolute root entry, over each sample's height. """
+        modules = self.model.domains[domain]
+        return modules.fk.root_relative_with_absolute_root(bones) / modules.heights[bank_ids][:, None, None, None]
+
+    def normalized_end_effector_velocity(self, domain: str, bones: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
+        """ Scaled world end-effector displacement per frame, over each sample's height. """
+        modules = self.model.domains[domain]
+        velocity = scaled_end_effector_velocity(modules.fk.world_positions(bones), modules.ee_ids)
+        return velocity / modules.heights[bank_ids][:, None, None, None]
+
+    def contact_fractions(self, state: SANReferenceForwardState) -> Dict[str, float]:
+        """
+        Share of generated end-effector samples below the contact threshold, keyed
+        "<source>_to_<destination>/contact_fraction". A route reaching zero stops training, so this is
+        the early warning.
+        """
+        return {
+            f"{source}_to_{destination}/contact_fraction": (
+                torch.linalg.vector_norm(pair.fake_velocity, dim=-1) < self.cfg.contact_threshold
+            ).float().mean().item()
+            for (source, destination), pair in state.pairs.items()
+        }
+
+    def compute_generator_losses(self, state: SANReferenceForwardState) -> Dict[str, torch.Tensor]:
+        """
+        Weighted generator terms, each logged on its own:
+          - "<domain>/reconstruction": every normalized edge and root channel
+          - "<domain>/root":           denormalized root XYZ over the source's height
+          - "<domain>/position":       root-relative positions over the source's height
+        and on all four "<source>_to_<destination>" routes:
+          - latent:                L1 between the source's code and the fake's re-encoded code
+          - end_effector / contact: velocity transfer, each side over its own skeleton's height
+        plus adversarial on the two cross-domain routes.
+        """
+        cfg = self.cfg
+        domains = self.model.domains
+        losses = {}
+
+        velocities = {}
+        for name, source in state.sources.items():
+            heights = domains[name].heights[source.bank_ids][:, None, None]
+            velocities[name] = self.normalized_end_effector_velocity(name, source.bones, source.bank_ids)
+
+            losses[f"{name}/reconstruction"] = cfg.reconstruction_lambda * F.mse_loss(source.reconstruction, source.motion)
+            losses[f"{name}/root"] = cfg.root_lambda * F.mse_loss(
+                source.reconstruction_denormalized[..., -3:] / heights,
+                source.denormalized[..., -3:] / heights,
+            )
+            losses[f"{name}/position"] = cfg.position_lambda * F.mse_loss(
+                self.normalized_positions(name, source.reconstruction_bones, source.bank_ids),
+                self.normalized_positions(name, source.bones, source.bank_ids),
+            )
+
+        for (source, destination), pair in state.pairs.items():
+            route = f"{source}_to_{destination}"
+
+            losses[f"{route}/latent"] = cfg.latent_lambda * F.l1_loss(
+                state.outputs.motion_codes[source],
+                state.outputs.pairs[(source, destination)].fake_code,
+            )
+
+            transfer, contact = reference_end_effector_terms(velocities[source], pair.fake_velocity, cfg.contact_threshold)
+            losses[f"{route}/end_effector"] = cfg.end_effector_lambda * transfer
+            losses[f"{route}/contact"] = cfg.end_effector_lambda * cfg.contact_lambda * contact
+
+            if source != destination:
+                losses[f"{route}/adversarial"] = cfg.adversarial_lambda * generator_adversarial_loss(
+                    domains[destination].discriminate(pair.fake_bones)
+                )
+
+        return losses
+
+    def compute_discriminator_losses(self, state: SANReferenceForwardState) -> Dict[str, torch.Tensor]:
+        """ Per domain: its real bones against fakes retargeted into it, detached and replayed. """
+        losses = {}
+        for (source, destination), pair in state.pairs.items():
+            if source != destination:
+                discriminate = self.model.domains[destination].discriminate
+                fake = self.buffers[destination].query(pair.fake_bones.detach())
+                losses[f"{destination}/discriminator"] = adversarial_loss(
+                    discriminate(state.sources[destination].bones),
+                    discriminate(fake),
+                )
+        return losses

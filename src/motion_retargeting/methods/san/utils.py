@@ -10,6 +10,7 @@ from typing import Dict, List, NamedTuple, Tuple
 import torch
 
 from motion_retargeting.kinematics.quaternions import quat_apply, quat_mul
+from motion_retargeting.methods.pan.utils import ReferenceSourceState
 
 from .config import DomainSpec
 
@@ -62,6 +63,21 @@ class SANReferenceGeneratorOutputs:
     motion_codes: Dict[str, torch.Tensor]
     reconstructions: Dict[str, torch.Tensor]
     pairs: Dict[Tuple[str, str], SANReferencePairOutputs]
+
+
+@dataclass
+class SANReferencePairState:
+    target_ids: torch.Tensor
+    fake_bones: torch.Tensor     # With the target bank's statistics and offsets
+    fake_velocity: torch.Tensor  # Scaled end-effector velocity over the target bank's height
+
+
+@dataclass
+class SANReferenceForwardState:
+    """ One generator forward and its kinematics; both optimizer steps of a train step reuse it. """
+    outputs: SANReferenceGeneratorOutputs
+    sources: Dict[str, ReferenceSourceState]
+    pairs: Dict[Tuple[str, str], SANReferencePairState]
 
 
 def split_by_domain(outputs: GeneratorOutputs) -> Dict[str, DomainOutputs]:

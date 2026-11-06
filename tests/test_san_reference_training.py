@@ -5,11 +5,23 @@ parity checks that run when SAN_REFERENCE_ROOT is set.
 
 from __future__ import annotations
 
-import torch
+from types import SimpleNamespace
+from unittest import mock
 
-from motion_retargeting.methods.san.config import SANModelConfig, SANReferenceDomainSpec
+import pytest
+import torch
+import torch.nn.functional as F
+
+from motion_retargeting.methods.pan.kinematics import END_EFFECTOR_VELOCITY_SCALE
+from motion_retargeting.methods.san.config import SANModelConfig, SANReferenceConfig, SANReferenceDomainSpec
+from motion_retargeting.methods.san.method import SANReferenceMethod
 from motion_retargeting.methods.san.model import SANReferenceModel
-from motion_retargeting.methods.san.utils import select_banks
+from motion_retargeting.methods.san.utils import (
+    SANReferenceGeneratorOutputs,
+    SANReferencePairOutputs,
+    select_banks,
+)
+from san_reference_support import copy_reference_weights, load_reference, reference_edges, requires_reference
 
 # The AMASS and CMU skeletons of configs/methods/san_reference.yaml.
 AMASS_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19]
@@ -56,6 +68,52 @@ def make_batch(specs, batch_size: int = BATCH_SIZE, window: int = WINDOW, seed: 
 def make_model(specs=None, seed: int = 0) -> SANReferenceModel:
     torch.manual_seed(seed)
     return SANReferenceModel(SANModelConfig(), specs if specs is not None else make_specs())
+
+
+def structure_config() -> SANModelConfig:
+    cfg = SANModelConfig()
+    cfg.motion_discriminator.train_structure = True
+    return cfg
+
+
+def make_method(specs=None, seed: int = 0, **cfg) -> SANReferenceMethod:
+    torch.manual_seed(seed)
+    return SANReferenceMethod(
+        model_cfg=structure_config(),
+        domain_specs=specs if specs is not None else make_specs(),
+        device="cpu",
+        cfg=SANReferenceConfig(**cfg),
+    )
+
+
+def fixed_outputs(specs, seed: int = 2) -> SANReferenceGeneratorOutputs:
+    """ Generator outputs that do not depend on the networks, so losses can be pinned on their own. """
+    generator = torch.Generator().manual_seed(seed)
+
+    def motion(name):
+        return torch.randn(BATCH_SIZE, WINDOW, specs[name].mean.shape[1], generator=generator)
+
+    def code():
+        return torch.randn(BATCH_SIZE, 112, WINDOW // 4, generator=generator)
+
+    return SANReferenceGeneratorOutputs(
+        motion_codes={name: code() for name in specs},
+        reconstructions={name: motion(name) for name in specs},
+        pairs={
+            (source, destination): SANReferencePairOutputs(
+                target_ids=torch.randint(specs[destination].num_banks, (BATCH_SIZE,), generator=generator),
+                fake=motion(destination),
+                fake_code=code(),
+            )
+            for source in specs
+            for destination in specs
+        },
+    )
+
+
+def losses_on_fixed_outputs(method: SANReferenceMethod, batch, outputs) -> dict:
+    with mock.patch.object(method.model, "forward_generator", return_value=outputs):
+        return method.compute_generator_losses(method.forward_state(batch))
 
 
 class TestRoutes:
@@ -142,3 +200,315 @@ class TestRoutes:
             assert code.grad_fn is not None
         for pair in outputs.pairs.values():
             assert pair.fake.grad_fn is not None and pair.fake_code.grad_fn is not None
+
+
+class TestObjective:
+    def test_terms_and_keys(self):
+        method = make_method()
+        losses = method.compute_generator_losses(method.forward_state(make_batch(method.domain_specs)))
+
+        expected = {f"{name}/{term}" for name in PARENTS for term in ("reconstruction", "root", "position")}
+        routes = [f"{s}_to_{d}" for s in PARENTS for d in PARENTS]
+        expected |= {f"{route}/{term}" for route in routes for term in ("latent", "end_effector", "contact")}
+        expected |= {"group_a_to_group_b/adversarial", "group_b_to_group_a/adversarial"}
+        assert set(losses) == expected
+
+    def test_each_weight_is_pinned_separately(self):
+        specs = make_specs()
+        batch = make_batch(specs)
+        outputs = fixed_outputs(specs)
+        unit = losses_on_fixed_outputs(
+            make_method(
+                specs,
+                reconstruction_lambda=1, root_lambda=1, position_lambda=1, latent_lambda=1,
+                end_effector_lambda=1, contact_lambda=1, adversarial_lambda=1,
+                contact_threshold=1e6,
+            ),
+            batch,
+            outputs,
+        )
+        weighted = losses_on_fixed_outputs(make_method(specs, contact_threshold=1e6), batch, outputs)
+
+        weights = {
+            "reconstruction": 5, "root": 1250, "position": 500, "latent": 2.5,
+            "end_effector": 50, "contact": 5000, "adversarial": 1,
+        }
+        for key, value in weighted.items():
+            assert value.item() == pytest.approx(weights[key.split("/")[1]] * unit[key].item(), rel=1e-5), key
+
+    def test_unit_terms_match_hand_computation(self):
+        specs = make_specs()
+        batch = make_batch(specs)
+        outputs = fixed_outputs(specs)
+        method = make_method(specs, contact_threshold=1e6)
+        losses = losses_on_fixed_outputs(method, batch, outputs)
+
+        name = "group_a"
+        spec = specs[name]
+        fk = method.model.domains[name].fk
+        ids = batch[name]["bank_id"]
+        motion, reconstruction = batch[name]["motion"], outputs.reconstructions[name]
+        mean, std = spec.mean[ids][:, None], spec.std[ids][:, None]
+        real_denormalized, rec_denormalized = motion * std + mean, reconstruction * std + mean
+        heights = spec.heights[ids]
+        h2, h3 = heights[:, None, None], heights[:, None, None, None]
+
+        assert losses["group_a/reconstruction"].item() == pytest.approx(
+            5 * ((reconstruction - motion) ** 2).mean().item(), rel=1e-5
+        )
+        assert losses["group_a/root"].item() == pytest.approx(
+            1250 * (((rec_denormalized[..., -3:] - real_denormalized[..., -3:]) / h2) ** 2).mean().item(), rel=1e-5
+        )
+
+        real_bones = fk.bone_vectors_with_absolute_root(real_denormalized, spec.offsets[ids])
+        rec_bones = fk.bone_vectors_with_absolute_root(rec_denormalized, spec.offsets[ids])
+        difference = fk.root_relative_with_absolute_root(rec_bones) - fk.root_relative_with_absolute_root(real_bones)
+        assert losses["group_a/position"].item() == pytest.approx(500 * ((difference / h3) ** 2).mean().item(), rel=1e-5)
+
+        # A fake is measured over the target bank's height and the source over its own.
+        pair = outputs.pairs[("group_a", "group_b")]
+        target = specs["group_b"]
+        target_fk = method.model.domains["group_b"].fk
+        fake_denormalized = pair.fake * target.std[pair.target_ids][:, None] + target.mean[pair.target_ids][:, None]
+        fake_world = target_fk.world_positions(
+            target_fk.bone_vectors_with_absolute_root(fake_denormalized, target.offsets[pair.target_ids])
+        )
+
+        def velocity(world, ee_ids, h):
+            ends = world[:, :, ee_ids]
+            return (ends[:, 1:] - ends[:, :-1]) * END_EFFECTOR_VELOCITY_SCALE / h
+
+        fake_velocity = velocity(fake_world, target.ee_ids, target.heights[pair.target_ids][:, None, None, None])
+        real_velocity = velocity(fk.world_positions(real_bones), spec.ee_ids, h3)
+        assert losses["group_a_to_group_b/end_effector"].item() == pytest.approx(
+            50 * ((fake_velocity - real_velocity) ** 2).mean().item(), rel=1e-5
+        )
+        # Every sample is a contact at this threshold, so the contact term repeats the transfer's error.
+        assert losses["group_a_to_group_b/contact"].item() == pytest.approx(
+            100 * losses["group_a_to_group_b/end_effector"].item(), rel=1e-5
+        )
+        assert losses["group_a_to_group_b/latent"].item() == pytest.approx(
+            2.5 * F.l1_loss(outputs.motion_codes["group_a"], pair.fake_code).item(), rel=1e-5
+        )
+
+    def test_contacts_are_selected_on_the_generated_velocity(self):
+        method = make_method()
+        state = method.forward_state(make_batch(method.domain_specs))
+        pair = state.pairs[("group_a", "group_b")]
+        selected = torch.linalg.vector_norm(pair.fake_velocity, dim=-1) < method.cfg.contact_threshold
+
+        source = state.sources["group_a"]
+        source_velocity = method.normalized_end_effector_velocity("group_a", source.bones, source.bank_ids)
+        expected = F.mse_loss(pair.fake_velocity[selected], source_velocity[selected])
+
+        losses = method.compute_generator_losses(state)
+        assert losses["group_a_to_group_b/contact"].item() == pytest.approx(5000 * expected.item(), rel=1e-5)
+
+    def test_scaling_offsets_and_root_together_leaves_position_terms_unchanged(self):
+        specs = make_specs()
+        scale = 3.0
+
+        def scaled(spec):
+            mean, std = spec.mean.clone(), spec.std.clone()
+            mean[:, -3:] *= scale
+            std[:, -3:] *= scale
+            return SANReferenceDomainSpec(parents=spec.parents, offsets=spec.offsets * scale, mean=mean, std=std)
+
+        batch = make_batch(specs)
+        outputs = fixed_outputs(specs)
+        original = losses_on_fixed_outputs(make_method(specs, contact_threshold=1e6), batch, outputs)
+        rescaled = losses_on_fixed_outputs(
+            make_method({name: scaled(spec) for name, spec in specs.items()}, contact_threshold=1e6),
+            batch,
+            outputs,
+        )
+
+        for key in original:
+            if key.split("/")[1] in ("root", "position", "end_effector", "contact"):
+                assert rescaled[key].item() == pytest.approx(original[key].item(), rel=1e-4), key
+
+    def test_contact_fraction_is_reported_per_route(self):
+        method = make_method()
+        state = method.forward_state(make_batch(method.domain_specs))
+        fractions = method.contact_fractions(state)
+
+        assert set(fractions) == {f"{s}_to_{d}/contact_fraction" for s in PARENTS for d in PARENTS}
+        assert all(0.0 <= value <= 1.0 for value in fractions.values())
+
+    def test_replay_holds_bones_and_real_bones_are_scored_first(self):
+        method = make_method()
+        state = method.forward_state(make_batch(method.domain_specs))
+        losses = method.compute_discriminator_losses(state)
+
+        assert set(losses) == {"group_a/discriminator", "group_b/discriminator"}
+        assert method.buffers["group_a"].items[0].shape == (1, WINDOW, len(AMASS_PARENTS), 3)
+
+
+def reached(method: SANReferenceMethod, loss: torch.Tensor) -> set:
+    """ The modules a loss term has a nonzero gradient on, named like the reference report's table. """
+    modules = {}
+    for letter, name in (("A", "group_a"), ("B", "group_b")):
+        domain = method.model.domains[name]
+        modules[f"enc_{letter}"] = domain.motion_encoder
+        modules[f"dec_{letter}"] = domain.decoder
+        modules[f"static_{letter}"] = domain.offset_encoder
+
+    found = set()
+    for label, module in modules.items():
+        grads = torch.autograd.grad(loss, list(module.parameters()), retain_graph=True, allow_unused=True)
+        if any(grad is not None and grad.abs().sum() > 0 for grad in grads):
+            found.add(label)
+    return found
+
+
+class TestGradientReach:
+    """ The per-term table of the reference report, measured there on the real graph at HEAD. """
+
+    A = {"enc_A", "dec_A", "static_A"}
+    B = {"enc_B", "dec_B", "static_B"}
+
+    @pytest.mark.parametrize(
+        "term, expected",
+        [
+            ("group_a/reconstruction", A),
+            ("group_a/root", A),
+            ("group_a/position", A),
+            ("group_b/reconstruction", B),
+            ("group_b/root", B),
+            ("group_b/position", B),
+            ("group_a_to_group_a/latent", A),
+            ("group_a_to_group_a/end_effector", A),
+            ("group_a_to_group_b/latent", {"enc_A", "static_A", "enc_B", "dec_B", "static_B"}),
+            ("group_a_to_group_b/end_effector", {"enc_A", "static_A", "dec_B", "static_B"}),
+            ("group_a_to_group_b/adversarial", {"enc_A", "static_A", "dec_B", "static_B"}),
+            ("group_b_to_group_a/latent", {"enc_A", "dec_A", "static_A", "enc_B", "static_B"}),
+            ("group_b_to_group_a/end_effector", {"dec_A", "static_A", "enc_B", "static_B"}),
+            ("group_b_to_group_a/adversarial", {"dec_A", "static_A", "enc_B", "static_B"}),
+            ("group_b_to_group_b/latent", B),
+            ("group_b_to_group_b/end_effector", B),
+        ],
+    )
+    def test_term_reaches_exactly_its_modules(self, term, expected):
+        method = make_method()
+        losses = method.compute_generator_losses(method.forward_state(make_batch(method.domain_specs)))
+        assert reached(method, losses[term]) == expected
+
+
+def run_reference_objective(reference, method: SANReferenceMethod, batch, target_ids) -> SimpleNamespace:
+    """
+    Runs the reference's own `GAN_model.forward` and `backward_G` with copied weights and the same target
+    draws. Its FK and discriminators see metres like ours; only its static encoder gets the centimetres
+    our domains feed theirs.
+    """
+    args = reference.args
+    names = list(method.domain_specs)
+    models, topologies = [], []
+    for name in names:
+        spec = method.domain_specs[name]
+        topology = (0, *spec.parents.tolist()[1:])
+        edges = reference_edges(reference, topology)
+        auto_encoder = reference.AE(args, edges)
+        static_encoder = reference.StaticEncoder(args, edges)
+        discriminator = reference.Discriminator(args, edges)
+        copy_reference_weights(method.model.domains[name], auto_encoder, static_encoder, discriminator)
+
+        topologies.append(topology)
+        models.append(SimpleNamespace(
+            auto_encoder=auto_encoder,
+            static_encoder=lambda offsets, encoder=static_encoder: encoder(offsets * 100),
+            discriminator=discriminator,
+            fk=reference.ForwardKinematics(args, edges),
+            height=spec.heights[:, None],
+            real_height=spec.heights,
+        ))
+
+    specs = [method.domain_specs[name] for name in names]
+    recorded = {}
+    gan = SimpleNamespace(
+        args=args,
+        n_topology=len(names),
+        character_names=[list(range(spec.num_banks)) for spec in specs],
+        is_train=True,
+        device=torch.device("cpu"),
+        models=models,
+        dataset=SimpleNamespace(
+            offsets=[spec.offsets for spec in specs],
+            joint_topologies=topologies,
+            ee_ids=[spec.ee_ids for spec in specs],
+            denorm=lambda i, ids, motion: motion * specs[i].std[ids][..., None] + specs[i].mean[ids][..., None],
+        ),
+        motions_input=[[batch[name]["motion"].transpose(1, 2), batch[name]["bank_id"]] for name in names],
+        criterion_rec=torch.nn.MSELoss(),
+        criterion_cycle=torch.nn.L1Loss(),
+        criterion_ee=reference.Criterion_EE(args, torch.nn.MSELoss()),
+        criterion_gan=reference.GAN_loss(args.gan_mode),
+        loss_recoder=SimpleNamespace(add_scalar=lambda name, value: recorded.__setitem__(name, float(value))),
+    )
+
+    draws = iter(target_ids)
+    with mock.patch.object(torch, "randint", side_effect=lambda *a, **k: next(draws)):
+        reference.GAN_model.forward(gan)
+    reference.GAN_model.backward_G(gan)
+
+    return SimpleNamespace(recorded=recorded, total=gan.loss_G_total.item())
+
+
+@requires_reference
+class TestAgainstReference:
+    def test_every_scalar_equals_the_references(self):
+        reference = load_reference()
+        method = make_method()
+        batch = make_batch(method.domain_specs)
+
+        generator = torch.Generator().manual_seed(5)
+        target_ids = [
+            torch.randint(method.domain_specs[destination].num_banks, (BATCH_SIZE,), generator=generator)
+            for _ in PARENTS
+            for destination in PARENTS
+        ]
+
+        draws = iter(target_ids)
+        run = run_reference_objective(reference, method, batch, target_ids)
+        with mock.patch.object(torch, "randint", side_effect=lambda *a, **k: next(draws)):
+            state = method.forward_state(batch)
+        losses = method.compute_generator_losses(state)
+
+        recorded = run.recorded
+        for index, name in enumerate(PARENTS):
+            assert losses[f"{name}/reconstruction"].item() / 5 == pytest.approx(recorded[f"rec_loss_quater_{index}"], rel=1e-4)
+            assert losses[f"{name}/root"].item() / 1250 == pytest.approx(recorded[f"rec_loss_global_{index}"], rel=1e-4)
+            assert losses[f"{name}/position"].item() / 500 == pytest.approx(recorded[f"rec_loss_position_{index}"], rel=1e-4)
+
+        reconstruction_total = cycle_total = ee_total = adversarial_total = 0.0
+        for index, name in enumerate(PARENTS):
+            reconstruction_total += recorded[f"rec_loss_quater_{index}"] + 100 * (
+                2.5 * recorded[f"rec_loss_global_{index}"] + recorded[f"rec_loss_position_{index}"]
+            )
+        for s, source in enumerate(PARENTS):
+            for d, destination in enumerate(PARENTS):
+                route = f"{source}_to_{destination}"
+                assert losses[f"{route}/latent"].item() / 2.5 == pytest.approx(recorded[f"cycle_loss_{s}_{d}"], rel=1e-4)
+                ours_ee = (losses[f"{route}/end_effector"].item() + losses[f"{route}/contact"].item()) / 50
+                assert ours_ee == pytest.approx(recorded[f"ee_loss_{s}_{d}"], rel=1e-4)
+                cycle_total += recorded[f"cycle_loss_{s}_{d}"]
+                ee_total += recorded[f"ee_loss_{s}_{d}"]
+                if source != destination:
+                    assert losses[f"{route}/adversarial"].item() == pytest.approx(recorded[f"G_loss_{s}_{d}"], rel=1e-4)
+                    adversarial_total += recorded[f"G_loss_{s}_{d}"]
+
+        assert sum(loss.item() for loss in losses.values()) == pytest.approx(run.total, rel=1e-4)
+        assert run.total == pytest.approx(
+            5 * reconstruction_total + 2.5 * cycle_total + 50 * ee_total + adversarial_total, rel=1e-4
+        )
+
+    def test_heights_equal_the_references_on_both_domains(self):
+        reference = load_reference()
+        for spec in make_specs().values():
+            parents = (0, *spec.parents.tolist()[1:])
+            for bank in range(spec.num_banks):
+                expected = reference.BVH_file.get_height(SimpleNamespace(
+                    offset=spec.offsets[bank].numpy(),
+                    topology=parents,
+                    ee_id=spec.ee_ids,
+                ))
+                assert spec.heights[bank].item() == pytest.approx(float(expected), rel=1e-5)
