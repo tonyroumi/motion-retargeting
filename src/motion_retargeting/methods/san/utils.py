@@ -68,6 +68,11 @@ def split_by_domain(outputs: GeneratorOutputs) -> Dict[str, DomainOutputs]:
     }
 
 
+def select_banks(static: List[torch.Tensor], bank_ids: torch.Tensor) -> List[torch.Tensor]:
+    """ Each level of a domain's static features over all K banks, at each sample's bank. """
+    return [level[bank_ids] for level in static]
+
+
 def restore_motion(
     rotations: torch.Tensor,
     root_vel: torch.Tensor,

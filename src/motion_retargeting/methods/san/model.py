@@ -10,12 +10,13 @@ from typing import Dict, Iterator, List
 import torch
 from torch import nn
 
+from motion_retargeting.methods.pan.kinematics import EdgeForwardKinematics
 from motion_retargeting.modules.decoders import SkeletalDecoder
 from motion_retargeting.modules.discriminators import SkeletalDiscriminator
 from motion_retargeting.modules.encoders import SkeletalEncoder
 from motion_retargeting.modules.skeletal import construct_adj
 
-from .config import DomainSpec, SANModelConfig
+from .config import DomainSpec, SANModelConfig, SANReferenceDomainSpec
 from .utils import GeneratorOutputs
 
 # Offsets come in meters, while SkeletalConv's static branch (scaled by 1/100) expects centimeters.
@@ -153,3 +154,75 @@ class SANModel(nn.Module):
     def discriminator_parameters(self) -> Iterator[nn.Parameter]:
         for domain in self.domains.values():
             yield from domain.discriminator.parameters()
+
+
+class SANReferenceDomain(nn.Module):
+    """
+    Reference-recipe networks of one domain, with its skeleton banks as persistent buffers. Takes motion in
+    the data view's layout [B, T, 4E + 3]; the networks see it as [B, 4 * J, T], with the root position
+    padded to a full token by one zero channel.
+    """
+
+    def __init__(self, cfg: SANModelConfig, spec: SANReferenceDomainSpec):
+        super().__init__()
+
+        # A target's identity selects these four together, for same-domain retargets as well.
+        self.register_buffer("offsets", spec.offsets)
+        self.register_buffer("mean", spec.mean)
+        self.register_buffer("std", spec.std)
+        self.register_buffer("heights", spec.heights)
+
+        self.fk = EdgeForwardKinematics(spec.parents.tolist())
+        self.ee_ids = spec.ee_ids
+
+        edge_list = spec.edge_list
+        adj_list = construct_adj(edge_list)
+
+        self.offset_encoder = SkeletalEncoder(
+            adj_list,
+            edge_list,
+            return_all=True,
+            **asdict(cfg.offset_encoder),
+        )
+        self.motion_encoder = SkeletalEncoder(
+            adj_list,
+            edge_list,
+            **asdict(cfg.motion_encoder),
+        )
+        self.decoder = SkeletalDecoder(
+            self.motion_encoder.pooling_hierarchy,
+            **asdict(cfg.motion_decoder),
+        )
+        self.discriminator = SkeletalDiscriminator(
+            self.offset_encoder.pooling_hierarchy,
+            **asdict(cfg.motion_discriminator),
+        )
+
+    def encode_offsets(self) -> List[torch.Tensor]:
+        """
+        Static features of all K banks, per encoder level. The J joint rows go through masks built for the
+        J edge-and-root tokens, with no global row added: token e reads joint e rather than its own edge's
+        child, and the last token reads the last joint. A reference accident, kept on purpose.
+        """
+        return self.offset_encoder((self.offsets * METERS_TO_CENTIMETERS).flatten(1).unsqueeze(-1))
+
+    def encode(self, motion: torch.Tensor, static: List[torch.Tensor]) -> torch.Tensor:
+        """ motion: [B, T, 4E + 3], static: per-sample levels -> latent [B, tokens * channels, T / 4]. """
+        padded = torch.cat([motion, torch.zeros_like(motion[..., :1])], dim=-1)
+        return self.motion_encoder(padded.transpose(1, 2), static)
+
+    def decode(self, latent: torch.Tensor, static: List[torch.Tensor]) -> torch.Tensor:
+        """ latent: [B, tokens * channels, T / 4], static: per-sample levels -> motion [B, T, 4E + 3]. """
+        return self.decoder(latent, static).transpose(1, 2)[..., :-1]
+
+    def denormalize(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
+        """ [B, T, 4E + 3], with each sample's bank statistics. """
+        return motion * self.std[bank_ids][:, None] + self.mean[bank_ids][:, None]
+
+    def bones(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
+        """ Normalized motion -> bone_vectors_with_absolute_root on each sample's bank. """
+        return self.fk.bone_vectors_with_absolute_root(self.denormalize(motion, bank_ids), self.offsets[bank_ids])
+
+    def discriminate(self, bones: torch.Tensor) -> torch.Tensor:
+        """ bones: [B, T, J, 3], in metres with no global row -> realism scores. BatchNorm removes the unit. """
+        return self.discriminator(bones.flatten(2))
