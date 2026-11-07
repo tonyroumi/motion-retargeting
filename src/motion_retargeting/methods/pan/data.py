@@ -80,7 +80,8 @@ class PANMotionDataset(Dataset):
       - bank_id:  scalar long, index into `offsets` / `mean` / `std`
 
     With `augment`, a sample is reversed in time with probability 0.5; its root velocity channels
-    are negated with it.
+    are negated and moved one frame, so frame t still carries the step t -> t + 1 (the last frame
+    repeats the previous step).
     """
 
     def __init__(
@@ -131,7 +132,9 @@ class PANMotionDataset(Dataset):
         motion = self.motion[idx]
         if self.augment and torch.rand(1).item() < 0.5:
             motion = motion.flip(0)
-            motion = torch.cat([motion[:, :-4], -motion[:, -4:]], dim=-1)
+            root_velocity = -motion[:, -4:]
+            root_velocity = torch.cat([root_velocity[1:], root_velocity[-1:]], dim=0)
+            motion = torch.cat([motion[:, :-4], root_velocity], dim=-1)
         motion = self.normalize(motion, bank_id)
         return {"motion": motion, "bank_id": bank_id}
 
