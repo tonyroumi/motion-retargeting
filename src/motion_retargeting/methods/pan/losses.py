@@ -20,9 +20,7 @@ def end_effector_terms(
     contact_threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    (transfer, contact) MSEs between normalized end-effector velocities [B, T - 1, 5, 3]. As in the
-    official code at its pinned commit, contact frames are selected on the *generated* velocity, not
-    the source's.
+    (transfer, contact) MSEs between normalized end-effector velocities [B, T - 1, 5, 3].
 
     An empty selection is NaN in the official code, which then trains through it. Here it raises
     instead: a zero contact term would be a different objective, not this one.
