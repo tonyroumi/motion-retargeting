@@ -230,8 +230,8 @@ class PANMethod(RetargetingMethod):
 
             losses[f"{name}/reconstruction"] = cfg.reconstruction_lambda * F.mse_loss(source.reconstruction, source.motion)
             losses[f"{name}/root"] = cfg.root_lambda * F.mse_loss(
-                source.reconstruction_denormalized[..., -4:-1] / heights,
-                source.denormalized[..., -4:-1] / heights,
+                source.reconstruction_bones[..., 0, :] / heights,
+                source.bones[..., 0, :] / heights,
             )
             losses[f"{name}/position"] = cfg.position_lambda * F.mse_loss(
                 self.normalized_positions(name, source.reconstruction_bones, source.bank_ids),
