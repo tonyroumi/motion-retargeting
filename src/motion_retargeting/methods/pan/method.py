@@ -245,7 +245,8 @@ class PANMethod(RetargetingMethod):
         """
         Weighted generator terms, each logged on its own:
           - "<domain>/reconstruction": every normalized edge and root velocity channel
-          - "<domain>/root":           denormalized root XYZ velocity over the source's height
+          - "<domain>/root":           root XYZ displacement from the window's first frame, integrated
+                                       from the root velocity as FK does, over the source's height
           - "<domain>/position":       root-relative positions over the source's height
         and on all four "<source>_to_<destination>" routes:
           - latent_cycle:                L1 between the source's code and the fake's re-encoded code
@@ -266,8 +267,8 @@ class PANMethod(RetargetingMethod):
 
             losses[f"{name}/reconstruction"] = cfg.reconstruction_lambda * F.mse_loss(source.reconstruction, source.motion)
             losses[f"{name}/root"] = cfg.root_lambda * F.mse_loss(
-                source.reconstruction_denormalized[..., -4:-1] / heights,
-                source.denormalized[..., -4:-1] / heights,
+                source.reconstruction_bones[..., 0, :] / heights,
+                source.bones[..., 0, :] / heights,
             )
             losses[f"{name}/position"] = cfg.position_lambda * F.mse_loss(
                 self.normalized_positions(name, source.reconstruction_bones, source.bank_ids),
