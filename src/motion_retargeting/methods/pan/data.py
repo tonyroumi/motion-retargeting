@@ -1,18 +1,3 @@
-"""
-PAN's edge / root-velocity data view, following the official Mixamo path.
-
-Built directly from the adapters' MotionCollections, before the shared window construction of
-`MotionDatasetBuilder` (whose windows cannot express edge rotations). SAN never sees this module.
-
-Known deviations from the original Mixamo assets, on purpose:
-  - configs/methods/pan.yaml's sources are AMASS / CMU. Clips are resampled on a timestamp grid (see
-    `resample_indices`), rather than Mixamo's literal `::2`.
-  - A "skeleton bank" stands in for a Mixamo character: clips share a bank only when their offset
-    tensors are exactly equal. That says nothing about the identity of the captured subject.
-  - Like the official code, statistics are fit before the holdout, so the holdout includes windows the
-    statistics saw. It is a reproduction diagnostic, not clean evidence of generalization.
-"""
-
 from __future__ import annotations
 
 import math
@@ -30,9 +15,6 @@ from motion_retargeting.data.utils import (
     extract_heading_yup,
 )
 
-# A channel whose std falls below this is left unscaled (std 1), as in the official code.
-MIN_STD = 1e-5
-
 
 @dataclass
 class PANDataConfig:
@@ -48,22 +30,12 @@ def resample_indices(num_frames: int, fps: float, target_fps: float) -> torch.Te
     stopping before the clip's duration. An integer rate ratio r gives exactly 0, r, 2r, ...
     """
     ratio = fps / target_fps
-    # The small slack keeps float error from adding a timestamp at exactly the clip's duration.
     num_resampled = math.ceil(num_frames / ratio - 1e-9)
     indices = torch.floor(torch.arange(num_resampled, dtype=torch.float64) * ratio + 0.5).long()
     return indices.clamp(max=num_frames - 1)
 
 
 def to_edge_channels(joint_rotations: torch.Tensor, root_position: torch.Tensor, parents: torch.Tensor) -> torch.Tensor:
-    """
-    joint_rotations [T, J, 4] + root_position [T, 3] -> physical channels [T - 1, 4E + 4].
-
-    Edge e = (parent, child), in ascending child index, carries the parent's rotation: a branching
-    joint's rotation repeats on each outgoing edge and a leaf's rotation disappears. The root is an
-    additional joint, carrying its velocity for the step t -> t + 1 (hence T - 1 frames): the world XYZ
-    displacement per frame and the yaw rate about the up (Y) axis, in radians per frame. Heading and
-    quaternion signs are kept as they are.
-    """
     edge_rotations = joint_rotations[:-1, parents[1:]]  # [T - 1, E, 4]
     linear_velocity = compute_linear_velocity(root_position, dt=1.0)[:-1]  # [T - 1, 3]
     yaw_velocity = compute_yaw_velocity_from_heading(
@@ -79,9 +51,7 @@ class PANMotionDataset(Dataset):
       - motion:   [W, 4E + 4], z-score normalized per channel with its bank's statistics
       - bank_id:  scalar long, index into `offsets` / `mean` / `std`
 
-    With `augment`, a sample is reversed in time with probability 0.5; its root velocity channels
-    are negated and moved one frame, so frame t still carries the step t -> t + 1 (the last frame
-    repeats the previous step).
+    With `augment`, a sample is reversed in time with probability 0.5
     """
 
     def __init__(
@@ -147,7 +117,7 @@ def fit_statistics(motion: torch.Tensor, bank_ids: torch.Tensor, num_banks: int)
         windows = motion[bank_ids == bank]
         mean[bank] = windows.mean(dim=(0, 1))
         bank_std = windows.var(dim=(0, 1)).sqrt()
-        std[bank] = torch.where(bank_std < MIN_STD, torch.ones_like(bank_std), bank_std)
+        std[bank] = torch.where(bank_std < 1e-5, torch.ones_like(bank_std), bank_std)
     return mean, std
 
 
@@ -180,7 +150,6 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
             if len(starts) == 0:
                 continue  # A bank exists only with windows to fit its statistics on.
 
-            # Exact equality, no rounding; adding 0.0 folds -0.0 into +0.0 before comparing bytes.
             key = (clip.offsets + 0.0).numpy().tobytes()
             bank = banks.setdefault(key, len(banks))
             if bank == len(offsets):
@@ -223,7 +192,6 @@ def split_holdout(dataset: PANMotionDataset, holdout_percent: int = 5) -> Tuple[
 
 
 def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDataset], Dict[str, PANMotionDataset]]:
-    """ {domain: train}, {domain: holdout} from the `dataset` section of the config. """
     train_datasets, holdout_datasets = {}, {}
     for name, group_cfg in dataset_cfg.items():
         config = PANDataConfig(**(group_cfg.get("params") or {}))
