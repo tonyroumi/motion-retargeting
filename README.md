@@ -31,15 +31,32 @@ python scripts/train.py --config configs/methods/pan.yaml
 
 Checkpoints record the official commit, representation, units, normalization scope, mask version, skeleton
 banks and endpoints. Loading refuses an older or otherwise incompatible checkpoint. **PAN checkpoints saved
-before this implementation do not load.**
+before this implementation do not load.** Checkpoints from before the skeleton-encoder centimetre
+conversion are also rejected: their metadata lacks `skeleton_encoder_offset_units: centimeters`.
+Weights have the same shapes, but feeding centimetres to weights trained on metres changes predictions;
+there is no automatic weight or optimizer migration. Start a new run, or use the old code for old checkpoints.
+Do not rescale cached offsets or checkpoint buffers: they remain in metres.
+
+The offset scale was checked against official commit `5a51d92`: `outer_utils/BVH_mod.py` reads raw
+BVH offsets, `data_preprocess/Mixamo/bvh_parser.py` selects joint rows, and `combined_motion.py`
+stacks them without unit conversion. `models/architecture_mixamo.py` passes them straight to
+`SkeletonEncoder`; `models/networks.py` applies the three linear layers and fuses their code as
+`z + s / 100`. The Mixamo `Aj.bvh` asset has approximately 32.6-unit upper/lower leg offsets,
+consistent with centimetres, not metres (BVH itself has no unit tag). PAN now multiplies its metre
+buffers by 100 only at the skeleton-encoder call. The decoder's `/100` is unchanged; it scales a
+learned code, not raw offsets, so it is not a second physical-unit conversion.
+
+Focused tests cover this boundary and unchanged physical computations. Whether it improves training
+stability has **not** been established; that requires matched training runs, not just forward/backward tests.
 
 ### What it does not reproduce
 
 `pan.yaml` runs on the AMASS and CMU sources, so it does not reproduce the paper's dataset-level scores, and
 no such claim should be made without an actual matched evaluation. The remaining differences:
 
-- **Sources and units.** AMASS and CMU in metres, not Mixamo's BVH assets. Offsets are never rescaled to
-  compensate for the official `/100` on skeleton codes.
+- **Sources and units.** AMASS and CMU in metres, not Mixamo's BVH assets. Skeleton-encoder offsets
+  are converted to centimetres; FK, heights, losses, discriminator positions and metrics retain their
+  existing physical units. This does not reproduce the reference's centimetre-valued physical positions.
 - **Characters.** A skeleton bank, meaning clips with exactly equal offsets, stands in for a Mixamo
   character. It does not identify a capture subject, and each bank gets its own statistics.
 - **Sampling.** Each domain's motion is sampled independently, not by shared index. Frames are resampled on

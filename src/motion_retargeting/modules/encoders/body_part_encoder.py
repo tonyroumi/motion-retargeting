@@ -33,7 +33,7 @@ class BodyPartEncoder(nn.Module):
 
     def forward(self, offsets: torch.Tensor) -> torch.Tensor:
         """
-        offsets: [K, J, 3], root included
+        offsets: [K, J, 3], centimetres, root included (converted by the PAN caller)
         returns: [K, P, D]
         """
         x = self.activation(self.linear1(offsets.flatten(1)))

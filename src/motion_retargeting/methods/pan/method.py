@@ -320,6 +320,7 @@ class PANMethod(RetargetingMethod):
         return {
             "representation": "edge_parent_quaternions_root_velocity_xyz_yaw",
             "physical_units": "meters",
+            "skeleton_encoder_offset_units": "centimeters",
             "normalization_scope": "per_skeleton_bank_all_channels_before_holdout",
             "domains": {
                 name: {

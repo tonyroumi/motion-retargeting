@@ -23,6 +23,9 @@ from .masks import (
 from .utils import GeneratorOutputs, PairOutputs
 
 
+METERS_TO_CENTIMETERS = 100.0
+
+
 class PANDomain(nn.Module):
     """ Networks of a single skeleton domain, with its masks and skeleton banks as persistent buffers. """
 
@@ -101,8 +104,10 @@ class PANModel(nn.Module):
         Reconstructs every domain, then runs all four source -> destination routes, each with a
         uniformly drawn target bank per sample and independently of how many clips a bank has.
         """
+        # Match the reference BVH scale only at the encoder boundary. Keep the persistent
+        # offsets in metres for FK, heights and checkpoints; decode still applies s / 100.
         skeleton_codes = {
-            name: domain.body_part_encoder(domain.offsets)
+            name: domain.body_part_encoder(domain.offsets * METERS_TO_CENTIMETERS)
             for name, domain in self.domains.items()
         }
 
