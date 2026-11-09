@@ -11,8 +11,9 @@ BLOCKED = float("-inf")
 
 def labeled_parts(body_joints: Optional[Dict[int, List[int]]], num_joints: int) -> List[List[int]]:
     """
-    The topology's manually labeled body parts as joint lists, ordered by key: left leg, right leg,
-    spine, head, left arm, right arm. The labels must assign every joint to exactly one non-empty part.
+    The topology's manually labeled body parts as joint lists, ordered by key. The key order is the
+    labeler's, not a fixed anatomy; `end_effector_ids` finds the feet, head and hands. The labels must
+    assign every joint to exactly one non-empty part.
     """
     if body_joints is None or sorted(body_joints) != list(range(NUM_PARTS)):
         raise ValueError(f"PAN needs {NUM_PARTS} labeled body parts keyed 0 to {NUM_PARTS - 1}, got {body_joints}")
