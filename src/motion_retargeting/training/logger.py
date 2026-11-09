@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import math
+import shutil
 from pathlib import Path
+
+SECTION_INDENT = "    "
+TERM_INDENT = "      "
+
+
+def format_value(value: float) -> str:
+    """ 4 decimals; scientific when that would hide the magnitude; nan / inf / -inf as such. """
+    value = float(value)
+    if not math.isfinite(value):
+        return str(value)
+    if value == 0 or 1e-3 <= abs(value) < 1e6:
+        return f"{value:.4f}"
+    return f"{value:.3e}"
 
 
 class MetricLogger:
@@ -56,45 +71,54 @@ class MetricLogger:
     def display(self, header: str, metrics: dict[str, float]) -> None:
         """ Print `header` followed by the metrics table, if `verbose`. """
         if self.verbose:
-            print(f"{header} {self.format_metrics(metrics)}")
+            print(f"{header}\n{self.format_metrics(metrics)}")
 
     @staticmethod
-    def format_metrics(metrics: dict[str, float]) -> str:
+    def format_metrics(metrics: dict[str, float], width: int | None = None) -> str:
         """
-        Table of metrics with one column per group (the part of the key before "/") and
-        one row per term, e.g. {"group_a/reconstruction": 0.12, "total/generator": 0.5} ->
+        Metrics grouped into sections by the part of the key before the last "/", one
+        "term .... value" row per metric, values right-aligned in one column, e.g.
+        {"group_a/reconstruction": 0.12, "grad/group_a/decoder": 3e-06} ->
 
-                               group_a     total
-            reconstruction      0.1200
-            generator                     0.5000
+            group_a
+              reconstruction ..    0.1200
+            grad/group_a
+              decoder ......... 3.000e-06
 
-        Keys without a "/" go in a "metrics" column; missing (group, term) cells stay blank.
+        Sections keep the order their keys first appear in; keys without a "/" go in a
+        "metrics" section. Lines fit in `width` columns (default: the terminal width, or
+        80 when output is redirected): a term too long for its row is printed whole on
+        its own line, with its value on the dotted line below. Names are never truncated.
         """
         if not metrics:
-            return "(no metrics)"
+            return "    (no metrics)"
+        if width is None:
+            width = shutil.get_terminal_size().columns
 
-        table: dict[str, dict[str, float]] = {}  # term -> group -> value
-        groups: list[str] = []
+        sections: dict[str, list[tuple[str, str]]] = {}
         for key, value in metrics.items():
-            group, _, term = key.rpartition("/")
-            group = group or "metrics"
-            if group not in groups:
-                groups.append(group)
-            table.setdefault(term, {})[group] = value
+            section, _, term = key.rpartition("/")
+            sections.setdefault(section or "metrics", []).append((term, format_value(value)))
 
-        term_width = max(len(term) for term in table)
-        col_width = max(10, *(len(group) for group in groups))
+        rows = [row for section_rows in sections.values() for row in section_rows]
+        value_width = max(len(value) for _, value in rows)
+        # Term plus its " .." leader, as wide as the longest term needs or the width allows.
+        field = min(
+            max(len(term) for term, _ in rows) + 3,
+            width - len(TERM_INDENT) - 1 - value_width,
+        )
 
-        header = " " * term_width + "".join(f"  {group:>{col_width}}" for group in groups)
-        rows = [
-            f"{term:<{term_width}}" + "".join(
-                f"  {values[group]:>{col_width}.4f}" if group in values else "  " + " " * col_width
-                for group in groups
-            )
-            for term, values in table.items()
-        ]
-
-        return "\n" + "\n".join("    " + line.rstrip() for line in [header, *rows])
+        lines = []
+        for section, section_rows in sections.items():
+            lines.append(SECTION_INDENT + section)
+            for term, value in section_rows:
+                value = f"{value:>{value_width}}"
+                if len(term) + 3 <= field:
+                    lines.append(f"{TERM_INDENT}{term} {'.' * (field - len(term) - 1)} {value}")
+                else:
+                    lines.append(TERM_INDENT + term)
+                    lines.append(f"{TERM_INDENT}  {'.' * max(field - 2, 1)} {value}")
+        return "\n".join(lines)
 
     def close(self) -> None:
         if self.writer is not None:
