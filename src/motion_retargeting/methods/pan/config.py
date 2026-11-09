@@ -21,12 +21,15 @@ class DomainSpec:
     """ One domain: its topology and skeleton banks, validated on construction. """
     parents: torch.Tensor  # [J], root first with parent -1
     offsets: torch.Tensor  # [K, J, 3], metres
-    mean: torch.Tensor     # [K, 4E + 4]
-    std: torch.Tensor      # [K, 4E + 4]
+    mean: torch.Tensor     # [K, 4J + 4]
+    std: torch.Tensor      # [K, 4J + 4]
     body_joints: Dict[int, List[int]]  # the topology's manually labeled body parts
 
     def __post_init__(self):
         labeled_parts(self.body_joints, self.num_joints)
+        expected = (self.num_banks, 4 * self.num_tokens)
+        if self.mean.shape != expected or self.std.shape != expected:
+            raise ValueError(f"PAN joint statistics must have shape {expected}; rebuild legacy edge data")
 
     @property
     def parts(self) -> List[List[int]]:
@@ -42,8 +45,8 @@ class DomainSpec:
 
     @property
     def num_tokens(self) -> int:
-        """ Network tokens: E edges + the root-velocity token, which is also J. """
-        return self.num_joints
+        """ Network tokens: J local joint quaternions plus the root-velocity token. """
+        return self.num_joints + 1
 
     @property
     def num_banks(self) -> int:

@@ -318,7 +318,10 @@ class PANMethod(RetargetingMethod):
 
     def checkpoint_metadata(self) -> Dict[str, Any]:
         return {
-            "representation": "edge_parent_quaternions_root_velocity_xyz_yaw",
+            "representation": "joint_local_quaternions_root_velocity_xyz_yaw",
+            "root_frame": "world_heading_kept_exclusive_velocity_sum",
+            "mask_version": "joint_parts_shared_root_and_velocity_v1",
+            "augmentation": "none",
             "physical_units": "meters",
             "normalization_scope": "per_skeleton_bank_all_channels_before_holdout",
             "domains": {

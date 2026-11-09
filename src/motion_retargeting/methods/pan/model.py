@@ -11,7 +11,7 @@ from motion_retargeting.modules.discriminators import MotionDiscriminator
 from motion_retargeting.modules.encoders import BodyPartEncoder, MotionEncoder
 
 from .config import DomainSpec, PANModelConfig
-from .kinematics import EdgeForwardKinematics
+from .kinematics import JointForwardKinematics
 from .masks import (
     attention_mask,
     parts_to_parts,
@@ -35,7 +35,7 @@ class PANDomain(nn.Module):
         self.register_buffer("std", spec.std)
         self.register_buffer("heights", spec.heights)
 
-        self.fk = EdgeForwardKinematics(spec.parents.tolist())
+        self.fk = JointForwardKinematics(spec.parents.tolist())
         self.ee_ids = spec.ee_ids
 
         parts = spec.parts
@@ -67,7 +67,7 @@ class PANDomain(nn.Module):
         )
 
     def denormalize(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
-        """ [B, T, 4E + 4], with each sample's bank statistics. """
+        """ [B, T, 4J + 4], with each sample's bank statistics. """
         return motion * self.std[bank_ids][:, None] + self.mean[bank_ids][:, None]
 
     def bones(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
@@ -96,7 +96,7 @@ class PANModel(nn.Module):
 
     def forward_generator(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> GeneratorOutputs:
         """
-        batch: {domain: {"motion": [B, T, 4E + 4], "bank_id": [B]}}
+        batch: {domain: {"motion": [B, T, 4J + 4], "bank_id": [B]}}
 
         Reconstructs every domain, then runs all four source -> destination routes, each with a
         uniformly drawn target bank per sample and independently of how many clips a bank has.

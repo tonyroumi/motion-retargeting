@@ -10,9 +10,9 @@ import torch
 class PairOutputs:
     """ One source -> destination route (same-domain routes included). """
     target_ids: torch.Tensor  # [B], the destination bank each sample is retargeted onto
-    fake: torch.Tensor        # [B, T, 4E + 4], normalized with the target's statistics
+    fake: torch.Tensor        # [B, T, 4J + 4], normalized with the target's statistics
     fake_code: torch.Tensor   # fake re-encoded by the destination's motion encoder
-    cycle: torch.Tensor       # [B, T, 4E + 4], decoded back onto the source's own banks
+    cycle: torch.Tensor       # [B, T, 4J + 4], decoded back onto the source's own banks
 
 
 @dataclass

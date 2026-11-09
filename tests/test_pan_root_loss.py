@@ -18,7 +18,7 @@ BODY_JOINTS = {0: [0, 1], 1: [2], 2: [3], 3: [4], 4: [5], 5: [6]}
 OFFSETS = torch.tensor(
     [[0.0, 0.0, 0.0], [0.1, -0.5, 0.0], [-0.1, -0.5, 0.0], [0.0, 0.5, 0.0], [0.0, 0.3, 0.0], [0.3, 0.2, 0.0], [-0.3, 0.2, 0.0]]
 )
-NUM_CHANNELS = 4 * (len(PARENTS) - 1) + 4
+NUM_CHANNELS = 4 * len(PARENTS) + 4
 NUM_FRAMES = 8
 ROOT_XYZ = slice(-4, -1)
 YAW = -1
@@ -43,8 +43,8 @@ def method() -> PANMethod:
 
 
 def source_motion() -> torch.Tensor:
-    """ [1, T, 4E + 4]: identity edge rotations, a random root velocity and yaw rate. """
-    rotations = torch.tensor([1.0, 0.0, 0.0, 0.0]).repeat(1, NUM_FRAMES, len(PARENTS) - 1)
+    """ [1, T, 4J + 4]: identity joint rotations, a random root velocity and yaw rate. """
+    rotations = torch.tensor([1.0, 0.0, 0.0, 0.0]).repeat(1, NUM_FRAMES, len(PARENTS))
     return torch.cat([rotations, torch.randn(1, NUM_FRAMES, 4)], dim=-1)
 
 
