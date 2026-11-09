@@ -67,9 +67,26 @@ class EdgeForwardKinematics:
         return torch.stack(positions, dim=-2)
 
 
-def end_effector_ids(parts: Sequence[Sequence[int]]) -> List[int]:
-    """ Part endpoints, ordered left foot tip, right foot tip, head tip, left hand, right hand. """
-    return [parts[part][-1] for part in (0, 1, 3, 4, 5)]
+def end_effector_ids(parts: Sequence[Sequence[int]], parents: Sequence[int], offsets: torch.Tensor) -> List[int]:
+    """
+    Part endpoints, ordered left foot tip, right foot tip, head tip, left hand, right hand.
+
+    Part keys follow the labeler's click order, not a fixed anatomy (the cached AMASS / CMU labels are
+    arms, head, trunk, legs; the Mixamo groups legs, spine, head, arms), so roles come from the Y-up rest
+    pose of the mean skeleton, offsets [K, J, 3]: the part holding the root is the trunk; of the other five,
+    the two lowest endpoints are the feet, the highest the head, the remaining two the hands. Within each
+    pair the lower key is the left side, as in every supported labeling and as the key-matched latent
+    slots assume.
+    """
+    mean_offsets = offsets.mean(dim=0)
+    rest = [torch.zeros_like(mean_offsets[0])]
+    for joint in range(1, len(parents)):
+        rest.append(rest[parents[joint]] + mean_offsets[joint])
+
+    limbs = [index for index, part in enumerate(parts) if 0 not in part]
+    limbs.sort(key=lambda index: rest[parts[index][-1]][1].item())
+    feet, hands, head = sorted(limbs[:2]), sorted(limbs[2:4]), limbs[4]
+    return [parts[index][-1] for index in (*feet, head, *hands)]
 
 
 def end_effector_velocity(world_positions: torch.Tensor, ee_ids: Sequence[int]) -> torch.Tensor:
@@ -78,14 +95,14 @@ def end_effector_velocity(world_positions: torch.Tensor, ee_ids: Sequence[int]) 
     return (end_effectors[:, 1:] - end_effectors[:, :-1]) * END_EFFECTOR_VELOCITY_SCALE
 
 
-def path_heights(offsets: torch.Tensor, parents: Sequence[int], parts: Sequence[Sequence[int]]) -> torch.Tensor:
+def path_heights(offsets: torch.Tensor, parents: Sequence[int], ee_ids: Sequence[int]) -> torch.Tensor:
     """
     The official code's skeleton height per bank, [K, J, 3] -> [K]: bone lengths from the left foot tip to
-    the root plus from the head tip to the root. Not a vertical extent.
+    the root plus from the head tip to the root (`end_effector_ids` slots 0 and 2). Not a vertical extent.
     """
     lengths = torch.linalg.vector_norm(offsets, dim=-1)  # [K, J]
     height = torch.zeros(offsets.shape[0], dtype=offsets.dtype, device=offsets.device)
-    for end in (parts[0][-1], parts[3][-1]):
+    for end in (ee_ids[0], ee_ids[2]):
         joint = end
         while joint != 0:
             height = height + lengths[:, joint]

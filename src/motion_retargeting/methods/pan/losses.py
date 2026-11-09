@@ -22,14 +22,16 @@ def end_effector_terms(
     """
     (transfer, contact) MSEs between normalized end-effector velocities [B, T - 1, 5, 3].
 
-    An empty selection is NaN in the official code, which then trains through it. Here it raises
-    instead: a zero contact term would be a different objective, not this one.
+    Contact frames are where the *source* end effector is planted (velocity norm below the threshold),
+    and there the generated velocity is pulled toward the source's. This departs from the official code,
+    which selects them on the generated velocity: that mask drains itself as the generator moves the
+    selected frames toward a moving source, until a batch has none and the official term turns NaN.
+
+    A source batch with no planted end effector has nothing to hold still, so its contact term is zero,
+    kept in the graph so per-term gradients stay defined.
     """
-    contacts = torch.linalg.vector_norm(fake_velocity, dim=-1) < contact_threshold
+    contacts = torch.linalg.vector_norm(source_velocity, dim=-1) < contact_threshold
+    transfer = F.mse_loss(fake_velocity, source_velocity)
     if not contacts.any():
-        raise RuntimeError(
-            f"End-effector loss: no generated velocity is below the contact threshold "
-            f"{contact_threshold} (the official contact term is NaN here). Stopping before any "
-            f"optimizer step of this batch."
-        )
-    return F.mse_loss(fake_velocity, source_velocity), F.mse_loss(fake_velocity[contacts], source_velocity[contacts])
+        return transfer, transfer * 0.0
+    return transfer, F.mse_loss(fake_velocity[contacts], source_velocity[contacts])

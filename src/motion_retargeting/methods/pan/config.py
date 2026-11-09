@@ -51,12 +51,12 @@ class DomainSpec:
 
     @property
     def ee_ids(self) -> List[int]:
-        return end_effector_ids(self.parts)
+        return end_effector_ids(self.parts, self.parents.tolist(), self.offsets)
 
     @property
     def heights(self) -> torch.Tensor:
-        """ [K], from the labeled parts' endpoints. """
-        return path_heights(self.offsets, self.parents.tolist(), self.parts)
+        """ [K], from the left foot and head end effectors. """
+        return path_heights(self.offsets, self.parents.tolist(), self.ee_ids)
 
     @classmethod
     def from_dataset(cls, dataset: PANMotionDataset) -> DomainSpec:
@@ -83,7 +83,7 @@ class PANConfig:
     adversarial_lambda: float = 1.0
     end_effector_lambda: float = 50.0
     contact_lambda: float = 100.0  # On top of end_effector_lambda
-    contact_threshold: float = 0.008  # Generated, normalized, scaled end-effector velocity norm
+    contact_threshold: float = 0.008  # Source, normalized, scaled end-effector velocity norm
 
     # Log each loss term's gradient norm every N train steps (0 disables; one extra backward per term)
     loss_grad_norm_interval: int = 0
