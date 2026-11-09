@@ -1,9 +1,9 @@
 """
-PAN's edge forward kinematics, following the official Mixamo path.
+PAN's joint forward kinematics, following the LAFAN1/dog quaternion hierarchy.
 
-Predicted edge rotations are applied independently: copies of a branching joint's rotation on its
-outgoing edges may differ, which is why this is not the generic joint `ForwardKinematics`. The bone
-ending at joint i is rotated by the accumulated transform including i's own edge rotation.
+The bone ending at joint i is rotated by its parent's accumulated rotation. Each joint has one
+local quaternion, shared by all its outgoing bones; a leaf rotation does not move its own position.
+Root heading and world-frame displacement retain this implementation's existing conventions.
 
 The losses use three distinct position spaces, named here rather than folded into one "global
 positions" helper:
@@ -25,29 +25,31 @@ from motion_retargeting.kinematics.quaternions import quat_apply, quat_mul, quat
 END_EFFECTOR_VELOCITY_SCALE = 10.0
 
 
-class EdgeForwardKinematics:
+class JointForwardKinematics:
     def __init__(self, parents: Sequence[int]):
         self.parents = [int(parent) for parent in parents]
 
     def bone_vectors_with_absolute_root(self, motion: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
         """
-        motion:  [B, T, 4E + 4], denormalized; the trailing 4 channels are the root velocity (XYZ, yaw rate)
+        motion:  [B, T, 4J + 4], denormalized; the trailing 4 channels are the root velocity (XYZ, yaw rate)
         offsets: [B, J, 3]
         returns: [B, T, J, 3]
         """
         B, T, _ = motion.shape
-        rotations = quat_normalize(motion[..., :-4].reshape(B, T, -1, 4))  # [B, T, E, 4]
+        if motion.shape[-1] != 4 * len(self.parents) + 4:
+            raise ValueError("PAN joint motion must have 4J + 4 channels; rebuild legacy edge data")
+        rotations = quat_normalize(motion[..., :-4].reshape(B, T, len(self.parents), 4))
         offsets = offsets[:, None].expand(-1, T, -1, -1)
 
-        accumulated = [motion.new_tensor([1.0, 0.0, 0.0, 0.0]).expand(B, T, 4)]
+        accumulated = [rotations[:, :, 0]]
         # Frame t carries the step t -> t + 1, so the position at t is the sum of the earlier steps; the
         # first frame is the origin. The yaw rate is not needed, the heading being in the root rotation.
         linear_velocity = motion[..., -4:-1]
         vectors = [torch.cumsum(linear_velocity, dim=1) - linear_velocity]
         for joint in range(1, len(self.parents)):
-            rotation = quat_mul(accumulated[self.parents[joint]], rotations[:, :, joint - 1])
-            accumulated.append(rotation)
-            vectors.append(quat_apply(rotation, offsets[:, :, joint]))
+            parent_rotation = accumulated[self.parents[joint]]
+            vectors.append(quat_apply(parent_rotation, offsets[:, :, joint]))
+            accumulated.append(quat_mul(parent_rotation, rotations[:, :, joint]))
         return torch.stack(vectors, dim=-2)
 
     def root_relative_with_absolute_root(self, bone_vectors: torch.Tensor) -> torch.Tensor:

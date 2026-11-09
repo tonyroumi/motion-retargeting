@@ -35,23 +35,24 @@ def resample_indices(num_frames: int, fps: float, target_fps: float) -> torch.Te
     return indices.clamp(max=num_frames - 1)
 
 
-def to_edge_channels(joint_rotations: torch.Tensor, root_position: torch.Tensor, parents: torch.Tensor) -> torch.Tensor:
-    edge_rotations = joint_rotations[:-1, parents[1:]]  # [T - 1, E, 4]
+def to_joint_channels(joint_rotations: torch.Tensor, root_position: torch.Tensor) -> torch.Tensor:
+    """ All J local quaternions (root heading kept), then world XYZ displacement and yaw per frame. """
+    rotations = joint_rotations[:-1]  # [T - 1, J, 4]
     linear_velocity = compute_linear_velocity(root_position, dt=1.0)[:-1]  # [T - 1, 3]
     yaw_velocity = compute_yaw_velocity_from_heading(
         extract_heading_yup(joint_rotations[:, 0]),
         fps=1.0,
     )[:-1]  # [T - 1, 1]
-    return torch.cat([edge_rotations.flatten(1), linear_velocity, yaw_velocity], dim=-1)
+    return torch.cat([rotations.flatten(1), linear_velocity, yaw_velocity], dim=-1)
 
 
 class PANMotionDataset(Dataset):
     """
     Each sample is a window of one skeleton bank:
-      - motion:   [W, 4E + 4], z-score normalized per channel with its bank's statistics
+      - motion:   [W, 4J + 4], z-score normalized per channel with its bank's statistics
       - bank_id:  scalar long, index into `offsets` / `mean` / `std`
 
-    With `augment`, a sample is reversed in time with probability 0.5
+    Samples retain their original temporal order; no data augmentation is applied.
     """
 
     def __init__(
@@ -63,22 +64,20 @@ class PANMotionDataset(Dataset):
         std: torch.Tensor,
         parents: torch.Tensor,
         body_joints: Dict[int, List[int]],
-        augment: bool = False,
     ):
-        self.motion = motion  # [N, W, 4E + 4], un-normalized
+        self.motion = motion  # [N, W, 4J + 4], un-normalized
         self.bank_ids = bank_ids  # [N]
         self.offsets = offsets  # [K, J, 3], metres
-        self.mean = mean  # [K, 4E + 4]
-        self.std = std  # [K, 4E + 4]
+        self.mean = mean  # [K, 4J + 4]
+        self.std = std  # [K, 4J + 4]
         self.parents = parents  # [J]
         self.body_joints = body_joints  # manually labeled body parts: {part: [joints]}
-        self.augment = augment
 
     @property
     def num_banks(self) -> int:
         return self.offsets.shape[0]
 
-    def subset(self, indices: torch.Tensor, augment: bool) -> PANMotionDataset:
+    def subset(self, indices: torch.Tensor) -> PANMotionDataset:
         """ The windows at `indices`, sharing this dataset's banks and statistics. """
         return PANMotionDataset(
             motion=self.motion[indices],
@@ -88,7 +87,6 @@ class PANMotionDataset(Dataset):
             std=self.std,
             parents=self.parents,
             body_joints=self.body_joints,
-            augment=augment,
         )
 
     def normalize(self, motion: torch.Tensor, bank_id: torch.Tensor) -> torch.Tensor:
@@ -100,11 +98,6 @@ class PANMotionDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         bank_id = self.bank_ids[idx]
         motion = self.motion[idx]
-        if self.augment and torch.rand(1).item() < 0.5:
-            motion = motion.flip(0)
-            root_velocity = -motion[:, -4:]
-            root_velocity = torch.cat([root_velocity[1:], root_velocity[-1:]], dim=0)
-            motion = torch.cat([motion[:, :-4], root_velocity], dim=-1)
         motion = self.normalize(motion, bank_id)
         return {"motion": motion, "bank_id": bank_id}
 
@@ -145,7 +138,7 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
             if rotations.shape[0] < 2:
                 continue  # A velocity needs two frames.
 
-            channels = to_edge_channels(rotations, root_position, parents)
+            channels = to_joint_channels(rotations, root_position)
             starts = range(0, channels.shape[0] - config.sequence_length + 1, config.stride)
             if len(starts) == 0:
                 continue  # A bank exists only with windows to fit its statistics on.
@@ -177,7 +170,7 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
 
 
 def split_holdout(dataset: PANMotionDataset, holdout_percent: int = 5) -> Tuple[PANMotionDataset, PANMotionDataset]:
-    """ (train, holdout): each bank's first windows, in order, train; only training samples are augmented. """
+    """ (train, holdout): each bank's first windows, in order, train; neither split is augmented. """
     train_indices, holdout_indices = [], []
     for bank in range(dataset.num_banks):
         indices = (dataset.bank_ids == bank).nonzero().flatten()
@@ -186,8 +179,8 @@ def split_holdout(dataset: PANMotionDataset, holdout_percent: int = 5) -> Tuple[
         holdout_indices.append(indices[num_train:])
 
     return (
-        dataset.subset(torch.cat(train_indices), augment=True),
-        dataset.subset(torch.cat(holdout_indices), augment=False),
+        dataset.subset(torch.cat(train_indices)),
+        dataset.subset(torch.cat(holdout_indices)),
     )
 
 

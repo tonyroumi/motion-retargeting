@@ -17,21 +17,26 @@ python scripts/retarget.py --model <checkpoint> --source-skeleton <path> --targe
 
 ## PAN
 
-There is one PAN implementation, and `configs/methods/pan.yaml` is its only training config. Where the
-official code and the paper disagree, it follows the official code: the Mixamo path of
-[`hlcdyy/pan-motion-retargeting`](https://github.com/hlcdyy/pan-motion-retargeting) at commit `5a51d92`.
-That means edge rotations with heading kept, root velocity (XYZ and yaw rate, as an additional joint; the official code uses the absolute root), full-channel normalization, masked networks,
-positional patch discriminators, the official objective, and generator-then-discriminator updates. The
-trainer settings are the published Mixamo command: batch size 128, learning rate 1e-3, 1001 epochs, no
-schedule.
+There is one PAN implementation, configured by `configs/methods/pan.yaml`. Its motion representation and
+joint masks follow the LAFAN1/dog path of
+[`hlcdyy/pan-motion-retargeting`](https://github.com/hlcdyy/pan-motion-retargeting): one local quaternion
+per joint (including root and leaves), followed by a four-channel root-velocity token. FK rotates each
+bone by its parent's accumulated rotation. **PAN applies no data augmentation.**
+
+Existing world-heading/root-trajectory conventions, losses, positional patch discriminators and
+optimizer order are preserved; this is not a wholesale port of the LAFAN1/dog training architecture.
+The trainer settings remain the published Mixamo command: batch size 128, learning rate 1e-3, 1001 epochs,
+no schedule. See [joint representation and migration](docs/pan_joint_representation.md) for the exact
+reference differences.
 
 ```bash
 python scripts/train.py --config configs/methods/pan.yaml
 ```
 
-Checkpoints record the official commit, representation, units, normalization scope, mask version, skeleton
-banks and endpoints. Loading refuses an older or otherwise incompatible checkpoint. **PAN checkpoints saved
-before this implementation do not load.**
+Checkpoints record representation, root convention, units, normalization scope, mask version, augmentation,
+skeleton banks and endpoints. Loading refuses an incompatible checkpoint. **Earlier edge-based PAN
+checkpoints cannot resume: rebuild channel statistics and train a fresh model.** Adapter caches containing
+local joint quaternions, root positions and offsets remain usable.
 
 ### What it does not reproduce
 
@@ -50,22 +55,14 @@ no such claim should be made without an actual matched evaluation. The remaining
   `*_squared_error_over_height2` is the official metric's form on reconstruction and cycle only. Neither
   is paired retarget accuracy.
 
-### Official quirks kept on purpose
+### Joint masks and reference checks
 
-These are official-code behavior, reproduced for parity and not because they are scientifically intended.
-Repairing any of them would be a different experiment.
+Motion masks use joint indices directly, with root rotation and velocity visible to every part. Skeleton
+masks read only each part's non-root joint offsets; the root storage row is masked out and the last joint
+is no longer a global offset. Existing source-selected contacts (including zero for an empty selection),
+integrated-root loss and world-space end-effector velocities are unchanged.
 
-- **Skeleton offset masks.** Edge indices select from a flattened joint offset tensor, and the always-on
-  last column reads the last joint, not the root.
-- **Contact selection.** Contacts are chosen on generated velocity below `0.008`. An empty selection is NaN
-  in the official code; here training stops with an error before either optimizer steps, and no zero-contact
-  variant is applied.
-
-One intentional deviation: the temporal conv masks (encoder shortcut and final decoder layer) convert the
-manually labeled joint parts to edge indices once. The official code's second conversion, an artifact of mutating
-shared lists, is not reproduced.
-
-The differential tests compare the other masks and layers against the official source, when it is available:
+The differential tests compare joint FK and masks against the LAFAN1/dog source when available:
 
 ```bash
 PAN_REFERENCE_ROOT=<official checkout> pytest tests/test_pan_*.py

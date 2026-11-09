@@ -1,6 +1,5 @@
 """
-PAN's edge channels through its FK against the generic joint `ForwardKinematics`, on a branching skeleton
-with nonidentity root and joint rotations, in order and reversed in time.
+PAN joint channels and parent-rotation FK on a branching skeleton, with no augmentation.
 """
 
 from __future__ import annotations
@@ -10,8 +9,8 @@ import torch
 
 from motion_retargeting.kinematics import ForwardKinematics
 from motion_retargeting.kinematics.quaternions import quat_apply
-from motion_retargeting.methods.pan.data import PANMotionDataset, to_edge_channels
-from motion_retargeting.methods.pan.kinematics import EdgeForwardKinematics, end_effector_velocity
+from motion_retargeting.methods.pan.data import PANMotionDataset, split_holdout, to_joint_channels
+from motion_retargeting.methods.pan.kinematics import JointForwardKinematics, end_effector_velocity
 
 # Joint 1 branches into 2 and 4, and the root into 1 and 5. Leaves: 3, 4, 6.
 PARENTS = [-1, 0, 1, 2, 1, 0, 5]
@@ -39,7 +38,7 @@ def joint_fk(rotations: torch.Tensor, root_position: torch.Tensor) -> torch.Tens
 
 
 def channels_of(rotations: torch.Tensor, root_position: torch.Tensor) -> torch.Tensor:
-    return to_edge_channels(rotations, root_position, torch.tensor(PARENTS))
+    return to_joint_channels(rotations, root_position)
 
 
 @pytest.fixture(autouse=True)
@@ -50,7 +49,7 @@ def seeded():
 class TestAgainstJointFK:
     def setup_method(self):
         self.rotations, self.root = random_motion()
-        self.fk = EdgeForwardKinematics(PARENTS)
+        self.fk = JointForwardKinematics(PARENTS)
         self.bones = self.fk.bone_vectors_with_absolute_root(channels_of(self.rotations, self.root)[None], OFFSETS[None])
         self.expected = joint_fk(self.rotations[:-1], self.root[:-1])
 
@@ -85,36 +84,77 @@ class TestAgainstJointFK:
         assert end_effector_velocity(self.fk.world_positions(bones), [6]).abs().max() < 1e-4
 
 
-class TestReversedWindow:
-    """ Reversing a window must give what the same poses and root positions, played backwards, give. """
+def test_channels_keep_every_joint_including_root_and_leaves():
+    rotations, root = random_motion()
+    channels = channels_of(rotations, root)
+    assert channels.shape == (NUM_FRAMES - 1, 4 * NUM_JOINTS + 4)
+    assert torch.equal(channels[:, :-4].reshape(-1, NUM_JOINTS, 4), rotations[:-1])
+    assert torch.allclose(channels[:, -4:-1], root[1:] - root[:-1])
 
-    def setup_method(self):
-        self.rotations, self.root = random_motion()
-        channels = channels_of(self.rotations, self.root)
-        dataset = PANMotionDataset(
-            motion=channels[None],
-            bank_ids=torch.zeros(1, dtype=torch.long),
-            offsets=OFFSETS[None],
-            mean=torch.zeros(1, channels.shape[-1]),
-            std=torch.ones(1, channels.shape[-1]),
-            parents=torch.tensor(PARENTS),
-            body_joints={},
-            augment=True,
-        )
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(torch, "rand", lambda *_: torch.zeros(1))
-            self.sample = dataset[0]["motion"]
-        # A window's frames hold the poses and root positions of all but the clip's last frame.
-        self.backwards_rotations = self.rotations[:-1].flip(0)
-        self.backwards_root = self.root[:-1].flip(0)
 
-    def test_fk_matches_joint_fk_of_the_motion_played_backwards(self):
-        fk = EdgeForwardKinematics(PARENTS)
-        bones = fk.bone_vectors_with_absolute_root(self.sample[None], OFFSETS[None])
-        expected = joint_fk(self.backwards_rotations, self.backwards_root)
-        assert torch.allclose(fk.world_positions(bones)[0], expected, atol=1e-5)
+def test_yaw_and_velocity_retain_world_frame_conventions():
+    angles = torch.arange(NUM_FRAMES) * 0.1
+    rotations = torch.tensor(IDENTITY).repeat(NUM_FRAMES, NUM_JOINTS, 1)
+    rotations[:, 0, 0] = torch.cos(angles / 2)
+    rotations[:, 0, 2] = torch.sin(angles / 2)
+    root = torch.stack([angles, angles * 2, angles * 3], dim=-1)
+    channels = channels_of(rotations, root)
+    assert torch.allclose(channels[:, -1], torch.full((NUM_FRAMES - 1,), 0.1), atol=1e-6)
+    assert torch.allclose(channels[:, -4:-1], torch.tensor([0.1, 0.2, 0.3]).expand(NUM_FRAMES - 1, 3))
 
-    def test_channels_match_the_motion_played_backwards(self):
-        """ Every frame with a known next pose, so the yaw rate too, which FK does not read. """
-        expected = channels_of(self.backwards_rotations, self.backwards_root)
-        assert torch.allclose(self.sample[:-1], expected, atol=1e-5)
+
+def test_joint_rotation_moves_descendants_not_its_own_position():
+    rotations = torch.tensor(IDENTITY).repeat(NUM_FRAMES, NUM_JOINTS, 1)
+    root = torch.zeros(NUM_FRAMES, 3)
+    fk = JointForwardKinematics(PARENTS)
+
+    def positions(q):
+        return fk.world_positions(fk.bone_vectors_with_absolute_root(channels_of(q, root)[None], OFFSETS[None]))
+
+    baseline = positions(rotations)
+    rotations[:, 1] = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    changed = positions(rotations)
+    assert torch.equal(changed[:, :, [0, 1, 5, 6]], baseline[:, :, [0, 1, 5, 6]])
+    assert not torch.allclose(changed[:, :, 2], baseline[:, :, 2])
+    assert not torch.allclose(changed[:, :, 4], baseline[:, :, 4])
+    rotations[:, LEAVES] = torch.tensor([0.0, 1.0, 0.0, 0.0])
+    assert torch.equal(positions(rotations), changed)
+
+
+def test_train_holdout_and_subset_never_augment():
+    rotations, root = random_motion()
+    channels = channels_of(rotations, root)
+    motion = torch.stack([channels + i for i in range(4)])
+    dataset = PANMotionDataset(
+        motion=motion,
+        bank_ids=torch.zeros(4, dtype=torch.long),
+        offsets=OFFSETS[None],
+        mean=torch.full((1, channels.shape[-1]), 0.5),
+        std=torch.full((1, channels.shape[-1]), 2.0),
+        parents=torch.tensor(PARENTS),
+        body_joints={},
+    )
+    train, holdout = split_holdout(dataset, 50)
+    for split, indices in ((train, [0, 1]), (holdout, [2, 3]), (dataset.subset(torch.tensor([3, 1])), [3, 1])):
+        assert not hasattr(split, "augment")
+        for _ in range(5):
+            before = torch.get_rng_state()
+            for sample, original in enumerate(indices):
+                assert torch.equal(split[sample]["motion"], (motion[original] - 0.5) / 2)
+            assert torch.equal(before, torch.get_rng_state())
+    assert torch.equal(dataset.motion, motion)
+
+
+def test_fk_gradients_are_finite():
+    rotations, root = random_motion()
+    motion = channels_of(rotations, root)[None].requires_grad_(True)
+    fk = JointForwardKinematics(PARENTS)
+    fk.world_positions(fk.bone_vectors_with_absolute_root(motion, OFFSETS[None])).square().sum().backward()
+    assert torch.isfinite(motion.grad).all()
+    assert motion.grad[..., :4].abs().sum() > 0
+    assert motion.grad[..., 4:8].abs().sum() > 0
+
+
+def test_legacy_edge_channels_are_rejected():
+    with pytest.raises(ValueError, match="4J"):
+        JointForwardKinematics(PARENTS).bone_vectors_with_absolute_root(torch.zeros(1, 8, 4 * NUM_JOINTS), OFFSETS[None])

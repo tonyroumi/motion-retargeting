@@ -24,30 +24,26 @@ def labeled_parts(body_joints: Optional[Dict[int, List[int]]], num_joints: int) 
     return parts
 
 
-def fresh_parts(parts: Sequence[Sequence[int]]) -> List[List[int]]:
-    """ Joint parts as edge indices: drop a leading root joint, then edge = joint - 1. """
-    return [[joint - 1 for joint in (part[1:] if part[0] == 0 else part)] for part in parts]
-
-
 def attention_mask(joint_parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
     """
     Additive mask [P + num_tokens, P + num_tokens], rows querying columns. A part token reads its own
     members; a member reads the members of every part it belongs to, so a token shared by several parts
-    relays across them; and every query reads the root token, which itself reads only itself. Member tokens
-    never read part tokens.
+    relays across them. Every query reads both the root joint and the trailing velocity token, as in
+    LAFAN1/dog. Member tokens never read part tokens.
     """
-    parts = fresh_parts(joint_parts)
+    parts = joint_parts
     num_parts = len(parts)
     size = num_parts + num_tokens
 
     allowed = torch.zeros(size, size, dtype=torch.bool)
     for index, part in enumerate(parts):
-        members = [num_parts + edge for edge in part]
+        members = [num_parts + joint for joint in part]
         allowed[index, members] = True
         for member in members:
             allowed[member, members] = True
     allowed[range(size), range(size)] = True
-    allowed[:, -1] = True
+    allowed[:, num_parts] = True  # root joint
+    allowed[:, -1] = True  # root velocity
 
     return torch.where(allowed, torch.tensor(0.0), torch.tensor(BLOCKED))
 
@@ -62,13 +58,19 @@ def part_token_mask(parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Te
 
 
 def temporal_conv_mask(joint_parts: Sequence[Sequence[int]], num_tokens: int) -> torch.Tensor:
-    """ `part_token_mask` of the encoder shortcut and final decoder layer, from the labeled body parts. """
-    return part_token_mask(fresh_parts(joint_parts), num_tokens)
+    """ Joint membership plus root rotation and velocity shared by all parts (LAFAN1/dog). """
+    mask = part_token_mask(joint_parts, num_tokens)
+    mask[:, 0] = True
+    return mask
 
 
 def skeleton_offset_mask(joint_parts: Sequence[Sequence[int]], num_joints: int) -> torch.Tensor:
-    """ `part_token_mask` of the skeleton encoder's first layer, read against joint offsets. """
-    return part_token_mask(fresh_parts(joint_parts), num_joints)
+    """ Each part reads its own non-root joint offsets; no velocity/global offset exists. """
+    mask = torch.zeros(len(joint_parts), num_joints, dtype=torch.bool)
+    for index, part in enumerate(joint_parts):
+        mask[index, part] = True
+    mask[:, 0] = False  # retain the J-row storage layout, but exclude root translation
+    return mask
 
 
 def tokens_to_parts(mask: torch.Tensor, channels_per_token: int, channels_per_part: int) -> torch.Tensor:
