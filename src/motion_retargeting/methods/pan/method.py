@@ -252,13 +252,13 @@ class PANMethod(RetargetingMethod):
                 positions[source],
             )
 
-            transfer, contact = end_effector_terms(
-                velocities[source],
-                self.normalized_end_effector_velocity(destination, pair.fake_bones, pair.target_ids),
-                cfg.contact_threshold,
-            )
-            losses[f"{route}/end_effector"] = cfg.end_effector_lambda * transfer
-            losses[f"{route}/contact"] = cfg.end_effector_lambda * cfg.contact_lambda * contact
+            # transfer, contact = end_effector_terms(
+            #     velocities[source],
+            #     self.normalized_end_effector_velocity(destination, pair.fake_bones, pair.target_ids),
+            #     cfg.contact_threshold,
+            # )
+            # losses[f"{route}/end_effector"] = cfg.end_effector_lambda * transfer
+            # losses[f"{route}/contact"] = cfg.end_effector_lambda * cfg.contact_lambda * contact
 
         adversarial = self.compute_adversarial_losses(state)
         losses.update({name: cfg.adversarial_lambda * loss for name, loss in adversarial.items()})

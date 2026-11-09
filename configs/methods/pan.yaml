@@ -35,7 +35,7 @@ method:
       num_layers: 2
       num_heads: 2
       feedforward_dim: 256
-      dropout: 0.2
+      dropout: 0.0
       part_token_std: 0.1
       kernel_size: 15
       positional_encoding_basis: 10000
@@ -50,7 +50,7 @@ method:
       kernel_size: 15
 
   params:
-    replay_buffer_size: 50
+    replay_buffer_size: 500
     swap_probability: 0.5
 
     reconstruction_lambda: 1
@@ -63,10 +63,10 @@ method:
     contact_threshold: 0.008
 
     # Log each loss term's gradient norm every N train steps (0 disables)
-    loss_grad_norm_interval: 0
+    loss_grad_norm_interval: 25
 
 trainer:
-  batch_size: 64
+  batch_size: 128
   learning_rate: 0.001
   num_epochs: 1001
 
