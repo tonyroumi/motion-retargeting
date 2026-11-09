@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 from dataclasses import dataclass
 
 import torch
@@ -62,6 +62,14 @@ def require_finite(losses: Dict[str, torch.Tensor]) -> None:
     bad = [name for name, loss in losses.items() if not torch.isfinite(loss)]
     if bad:
         raise RuntimeError(f"Non-finite loss terms, no optimizer stepped on them: {bad}")
+
+
+class NonFiniteGradientError(RuntimeError):
+    """ A gradient norm that is NaN or infinite, raised before either optimizer steps. """
+
+    def __init__(self, message: str, parameters: List[str]):
+        super().__init__(message)
+        self.parameters = parameters  # those whose gradient holds a NaN or infinity
 
 
 def mpjpe(predicted: torch.Tensor, target: torch.Tensor) -> float:

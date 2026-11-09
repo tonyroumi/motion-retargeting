@@ -88,6 +88,18 @@ class PANConfig:
     # Log each loss term's gradient norm every N train steps (0 disables; one extra backward per term)
     loss_grad_norm_interval: int = 0
 
+    # Clip the generator's global gradient norm to this before its step (0 disables; the official code
+    # does not clip). Non-finite gradients always stop training before either optimizer steps.
+    generator_max_grad_norm: float = 0.0
+    # Report a step, and save a replayable capture of it, when the generator's pre-clip global gradient
+    # norm exceeds this factor times its running baseline (0 disables). Only the latest
+    # `spike_capture_limit` spike captures are kept.
+    grad_spike_factor: float = 0.0
+    spike_capture_limit: int = 5
+    # Also store the batch's normalized motion in captures. Off: only dataset indices, reversal flags
+    # and a checksum, which replay against the same datasets.
+    capture_batch_motion: bool = False
+
 
 @dataclass
 class PANModelConfig:

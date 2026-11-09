@@ -50,6 +50,9 @@ class PANMotionDataset(Dataset):
     Each sample is a window of one skeleton bank:
       - motion:   [W, 4E + 4], z-score normalized per channel with its bank's statistics
       - bank_id:  scalar long, index into `offsets` / `mean` / `std`
+      - index:    scalar long, the sample's index in this dataset
+      - reversed: scalar bool, whether the window was reversed in time
+      - window:   [3] long, (source, clip, start frame) the window was cut from; -1 when unknown
 
     With `augment`, a sample is reversed in time with probability 0.5
     """
@@ -64,6 +67,7 @@ class PANMotionDataset(Dataset):
         parents: torch.Tensor,
         body_joints: Dict[int, List[int]],
         augment: bool = False,
+        windows: torch.Tensor | None = None,
     ):
         self.motion = motion  # [N, W, 4E + 4], un-normalized
         self.bank_ids = bank_ids  # [N]
@@ -73,6 +77,9 @@ class PANMotionDataset(Dataset):
         self.parents = parents  # [J]
         self.body_joints = body_joints  # manually labeled body parts: {part: [joints]}
         self.augment = augment
+        # [N, 3]: source index in the group's `sources`, clip index in that source's collection, and
+        # start frame after resampling
+        self.windows = windows if windows is not None else torch.full((motion.shape[0], 3), -1, dtype=torch.long)
 
     @property
     def num_banks(self) -> int:
@@ -89,6 +96,7 @@ class PANMotionDataset(Dataset):
             parents=self.parents,
             body_joints=self.body_joints,
             augment=augment,
+            windows=self.windows[indices],
         )
 
     def normalize(self, motion: torch.Tensor, bank_id: torch.Tensor) -> torch.Tensor:
@@ -98,15 +106,26 @@ class PANMotionDataset(Dataset):
         return self.motion.shape[0]
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        reverse = self.augment and torch.rand(1).item() < 0.5
+        return self.sample(idx, reverse)
+
+    def sample(self, idx: int, reverse: bool) -> Dict[str, torch.Tensor]:
+        """ Window `idx`, reversed in time or not, normalized with its bank's statistics. """
         bank_id = self.bank_ids[idx]
         motion = self.motion[idx]
-        if self.augment and torch.rand(1).item() < 0.5:
+        if reverse:
             motion = motion.flip(0)
             root_velocity = -motion[:, -4:]
             root_velocity = torch.cat([root_velocity[1:], root_velocity[-1:]], dim=0)
             motion = torch.cat([motion[:, :-4], root_velocity], dim=-1)
         motion = self.normalize(motion, bank_id)
-        return {"motion": motion, "bank_id": bank_id}
+        return {
+            "motion": motion,
+            "bank_id": bank_id,
+            "index": torch.tensor(idx),
+            "reversed": torch.tensor(reverse),
+            "window": self.windows[idx],
+        }
 
 
 def fit_statistics(motion: torch.Tensor, bank_ids: torch.Tensor, num_banks: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -132,12 +151,13 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
             raise ValueError("All sources in a group must share one set of labeled body parts")
 
     windows: List[torch.Tensor] = []
+    window_sources: List[Tuple[int, int, int]] = []
     bank_ids: List[int] = []
     banks: Dict[bytes, int] = {}
     offsets: List[torch.Tensor] = []
 
-    for collection in collections:
-        for clip in collection.motions:
+    for source, collection in enumerate(collections):
+        for clip_index, clip in enumerate(collection.motions):
             rotations, root_position = clip.joint_rotations, clip.root_position
             if config.target_fps is not None and clip.fps != config.target_fps:
                 indices = resample_indices(rotations.shape[0], clip.fps, config.target_fps)
@@ -156,6 +176,7 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
                 offsets.append(clip.offsets)
 
             windows.extend(channels[start:start + config.sequence_length] for start in starts)
+            window_sources.extend((source, clip_index, start) for start in starts)
             bank_ids.extend([bank] * len(starts))
 
     if not windows:
@@ -173,6 +194,7 @@ def build_from_collections(collections: List[MotionCollection], config: PANDataC
         std=std,
         parents=parents,
         body_joints=body_joints,
+        windows=torch.tensor(window_sources, dtype=torch.long),
     )
 
 
@@ -202,3 +224,34 @@ def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDa
 
         train_datasets[name], holdout_datasets[name] = split_holdout(dataset, config.holdout_percent)
     return train_datasets, holdout_datasets
+
+
+def batch_checksum(motion: torch.Tensor) -> torch.Tensor:
+    """ [B], a per-sample fingerprint of normalized motion [B, T, C], to check a rebuilt batch against. """
+    return motion.detach().double().sum(dim=(1, 2)).cpu()
+
+
+def rebuild_batch(
+    datasets: Dict[str, PANMotionDataset],
+    provenance: Dict[str, Dict[str, torch.Tensor]],
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    """
+    A captured batch from its per-domain provenance ({"index", "reversed", "checksum"}, or "motion"
+    when the capture stored it), drawing the windows from `datasets` and checking their checksums.
+    """
+    batch = {}
+    for name, item in provenance.items():
+        if "motion" in item:
+            batch[name] = {key: value for key, value in item.items() if key != "checksum"}
+            continue
+
+        dataset = datasets[name]
+        samples = [
+            dataset.sample(int(idx), bool(reverse))
+            for idx, reverse in zip(item["index"].tolist(), item["reversed"].tolist())
+        ]
+        batch[name] = {key: torch.stack([sample[key] for sample in samples]) for key in samples[0]}
+
+        if not torch.allclose(batch_checksum(batch[name]["motion"]), item["checksum"].cpu(), rtol=1e-9, atol=1e-6):
+            raise ValueError(f"Rebuilt {name} windows do not match the capture: the dataset differs from training")
+    return batch

@@ -24,7 +24,8 @@ class TrainerConfig:
     checkpoint_interval: int = 10
 
     # Each run writes to <log_dir>/<timestamp>/: TensorBoard files at the top level,
-    # checkpoints in checkpoints/, validation visualizations in checkpoints/visualizations/.
+    # checkpoints in checkpoints/, validation visualizations in checkpoints/visualizations/,
+    # and any diagnostic captures of training steps in captures/.
     log_dir: str = "logs"
     use_tensorboard: bool = True
     verbose: bool = True
@@ -57,6 +58,7 @@ class Trainer:
         self.checkpoint_dir = self.run_dir / "checkpoints"
         self.visualization_dir = self.checkpoint_dir / "visualizations"
         self.checkpoint_dir.mkdir(parents=True)
+        self.method.capture_dir = self.run_dir / "captures"
 
         self.logger = MetricLogger(
             log_dir=self.run_dir,

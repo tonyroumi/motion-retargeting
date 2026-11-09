@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 
 class RetargetingMethod(ABC):
     """
     Base class for all motion retargeting methods.
     """
+
+    # Where a method may save diagnostic captures of a training step; the Trainer sets it per run.
+    capture_dir: Path | None = None
 
     def __init__(self) -> None:
         super().__init__()
