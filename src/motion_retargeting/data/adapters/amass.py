@@ -59,6 +59,7 @@ class AMASSAdapter(MotionSourceAdapter):
             J0 = bm(betas=betas.unsqueeze(0)).Jtr[0, :self.NUM_JOINTS]
             offsets = torch.zeros_like(J0)
             offsets[1:] = J0[1:] - J0[parents[1:]]  # Parent-relative offsets (root offset zero)
+            offsets *= 100 # convert to cm
 
             rots = poses.reshape(num_frames, -1, 3)
 

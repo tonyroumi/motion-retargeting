@@ -20,7 +20,7 @@ from motion_retargeting.data.representations.motion import MotionData
 from motion_retargeting.kinematics.quaternions import quat_mul
 
 
-INCHES_TO_METERS = 2.54 / 100.0
+INCHES_TO_CENTIMETERS = 2.54
 
 # Bones below the wrists are dropped
 EXCLUDED_BONES = ("lhand", "lthumb", "lfingers", "rhand", "rthumb", "rfingers")
@@ -160,7 +160,7 @@ def parse_asf(path: Path) -> _ASF:
                 continue
             asf.children[tokens[0]] = [child for child in tokens[1:] if child not in EXCLUDED_BONES]
 
-    asf.scale = (1.0 / length_unit) * INCHES_TO_METERS
+    asf.scale = (1.0 / length_unit) * INCHES_TO_CENTIMETERS
     for name in asf.bone_vectors:
         asf.bone_vectors[name] = asf.bone_vectors[name] * asf.scale
 

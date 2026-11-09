@@ -229,10 +229,10 @@ class PANMethod(RetargetingMethod):
             velocities[name] = self.normalized_end_effector_velocity(name, source.bones, source.bank_ids)
 
             losses[f"{name}/reconstruction"] = cfg.reconstruction_lambda * F.mse_loss(source.reconstruction, source.motion)
-            losses[f"{name}/root"] = cfg.root_lambda * F.mse_loss(
-                source.reconstruction_bones[..., 0, :] / heights,
-                source.bones[..., 0, :] / heights,
-            )
+            # losses[f"{name}/root"] = cfg.root_lambda * F.mse_loss(
+            #     source.reconstruction_bones[..., 0, :] / heights,
+            #     source.bones[..., 0, :] / heights,
+            # )
             losses[f"{name}/position"] = cfg.position_lambda * F.mse_loss(
                 self.normalized_positions(name, source.reconstruction_bones, source.bank_ids),
                 positions[name],
