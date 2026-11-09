@@ -71,6 +71,44 @@ The differential tests compare the other masks and layers against the official s
 PAN_REFERENCE_ROOT=<official checkout> pytest tests/test_pan_*.py
 ```
 
+### Training safety and step captures
+
+- **Finite checks.** A train step steps neither optimizer unless every loss term and every gradient norm
+  (generator, then discriminator) is finite. A non-finite one raises, naming the modules and parameters.
+  Both optimizers step at the end of the train step. Neither step changes what the other's gradients were
+  computed from, so this is the same generator-then-discriminator update. It is bit-identical when clipping
+  is off.
+- **Clipping.** `generator_max_grad_norm` clips the generator's global gradient norm before its step. It
+  defaults to `0`, off, as in the official code. `grad/generator` logs the pre-clip norm every step.
+  Choose the value from that log: the run the clip was diagnosed on sat at 1-10, but the current objective
+  starts well above that.
+- **Captures.** Whenever a train step raises, `<run>/captures/step_<N>_failure.pt` records it. When the
+  pre-clip generator norm exceeds `grad_spike_factor` (`10` in `pan.yaml`) times its running baseline,
+  the step is printed and saved as `step_<N>_spike.pt`. Only the latest `spike_capture_limit` (5) spike
+  captures are kept, at about 64 MB each.
+- **What a capture holds.**
+  - The weights and both Adam states from before the step, the replay buffers, and the CPU, CUDA and
+    Python RNG states.
+  - The PAN config.
+  - A report: losses, gradient norms, and per-module weight and Adam second-moment norms. For each domain,
+    its largest normalized inputs, with source/clip/start window, bank, channel and that bank's std, plus
+    each sample's target banks and the longest root travel.
+- **Training data.** By default the batch is stored as dataset indices, reversal flags and a checksum, not
+  motion. `capture_batch_motion: true` stores the motion as well. So does a batch without dataset indices,
+  and its report says that provenance was unavailable.
+- **Replay.**
+
+  ```bash
+  python scripts/replay_pan_capture.py --config configs/methods/pan.yaml --capture <run>/captures/<capture>.pt
+  ```
+
+  This rebuilds the batch, refusing if the datasets no longer match the checksum. It prints each generator
+  term with its own gradient norm, then reruns the step and compares it with the capture. On the captured
+  device it matches up to that device's floating-point nondeterminism; on CUDA it was exact in testing. A
+  NaN that does not replay came from outside the captured state.
+- **Step numbering.** `N` is the method's train-step count, which equals the TensorBoard step in a run
+  that was not resumed from a checkpoint.
+
 To train on the PAN authors' datasets (Mixamo, LAFAN1 and the dog), see [docs/author_datasets.md](docs/author_datasets.md).
 
 ## SAN

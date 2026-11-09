@@ -59,6 +59,15 @@ method:
     # Log each loss term's gradient norm every N train steps (0 disables)
     loss_grad_norm_interval: 0
 
+    # Generator global gradient-norm clip (0 disables, as in the official code). Choose it from this
+    # config's logged grad/generator, which is far above the 1-10 of the run the clip was diagnosed on.
+    generator_max_grad_norm: 0
+    # Capture steps whose pre-clip generator gradient norm exceeds this many times its running baseline,
+    # keeping the latest few (0 disables)
+    grad_spike_factor: 10
+    spike_capture_limit: 5
+    capture_batch_motion: false
+
 trainer:
   batch_size: 64
   learning_rate: 0.001
