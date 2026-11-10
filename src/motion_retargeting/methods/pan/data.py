@@ -15,6 +15,8 @@ from motion_retargeting.data.utils import (
     extract_heading_yup,
 )
 
+from .reference import ReferenceData, load_reference_splits
+
 
 @dataclass
 class PANDataConfig:
@@ -67,10 +69,12 @@ class PANMotionDataset(Dataset):
         std: torch.Tensor,
         parents: torch.Tensor,
         body_joints: Dict[int, List[int]],
+        reference: ReferenceData | None = None,
     ):
+        self.reference = reference
         self.motion = motion  # [N, W, 4J + 4], un-normalized
         self.bank_ids = bank_ids  # [N]
-        self.offsets = offsets  # [K, J, 3], metres
+        self.offsets = offsets  # [K, J, 3], metres (reference archives: cm)
         self.mean = mean  # [K, 4J + 4]
         self.std = std  # [K, 4J + 4]
         self.parents = parents  # [J]
@@ -90,6 +94,7 @@ class PANMotionDataset(Dataset):
             std=self.std,
             parents=self.parents,
             body_joints=self.body_joints,
+            reference=self.reference,
         )
 
     def normalize(self, motion: torch.Tensor, bank_id: torch.Tensor) -> torch.Tensor:
@@ -102,6 +107,8 @@ class PANMotionDataset(Dataset):
         bank_id = self.bank_ids[idx]
         motion = self.motion[idx]
         motion = self.normalize(motion, bank_id)
+        if self.reference is not None:
+            motion = motion.float()  # reference normalizes in archive precision before FP32
         return {"motion": motion, "bank_id": bank_id}
 
 
@@ -203,7 +210,17 @@ def limit_windows(dataset: PANMotionDataset, max_windows: int | None, seed: int 
 
 def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDataset], Dict[str, PANMotionDataset]]:
     train_datasets, holdout_datasets = {}, {}
+    archive_groups = [group for group in dataset_cfg.values() if "reference_archive" in group]
+    if archive_groups and (len(dataset_cfg) != 2 or len(archive_groups) != 2 or
+                           sorted(group["reference_archive"]["kind"] for group in archive_groups) != ["dog", "lafan1"]):
+        raise ValueError("Reference PAN requires exactly one lafan1 and one dog archive domain; no raw mixing")
     for name, group_cfg in dataset_cfg.items():
+        if "reference_archive" in group_cfg:
+            if set(group_cfg) != {"reference_archive"}:
+                raise ValueError("reference_archive cannot be combined with raw sources/params")
+            archive = group_cfg["reference_archive"]
+            train_datasets[name], holdout_datasets[name] = load_reference_splits(**archive)
+            continue
         config = PANDataConfig(**(group_cfg.get("params") or {}))
         collections = [build_adapter(source).load() for source in group_cfg["sources"]]
 
