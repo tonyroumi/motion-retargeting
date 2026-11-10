@@ -9,6 +9,10 @@ dataset:
       stride: 32
       target_fps: 30
       holdout_percent: 5
+      # Train on at most N windows of this domain, a seeded random subset of its
+      # post-holdout training split (null: all). The holdout is unaffected.
+      max_train_windows: null
+      max_train_windows_seed: 0
 
   group_b:
     sources:
@@ -18,6 +22,8 @@ dataset:
       stride: 32
       target_fps: 30
       holdout_percent: 5
+      max_train_windows: null
+      max_train_windows_seed: 0
 
 method:
   name: pan
