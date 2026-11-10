@@ -38,6 +38,14 @@ skeleton banks and endpoints. Loading refuses an incompatible checkpoint. **Earl
 checkpoints cannot resume: rebuild channel statistics and train a fresh model.** Adapter caches containing
 local joint quaternions, root positions and offsets remain usable.
 
+To train on less data, set `max_train_windows` in a domain's `dataset.<group>.params`. The unit is one
+training window (`sequence_length` frames). After the holdout split, the domain trains on a random subset
+of at most that many windows, chosen by `max_train_windows_seed` and kept in temporal order. `null`, the
+default, uses every window; a cap at or above the split's size changes nothing. The holdout, skeleton banks
+and per-bank statistics are still built from the whole domain, so validation stays comparable across caps.
+Each epoch draws as many samples from every domain as the smallest training set holds, so capping one
+domain also shortens epochs for the others.
+
 ### What it does not reproduce
 
 `pan.yaml` runs on the AMASS and CMU sources, so it does not reproduce the paper's dataset-level scores, and

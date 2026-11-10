@@ -22,6 +22,9 @@ class PANDataConfig:
     stride: int = 32
     target_fps: float | None = 30.0
     holdout_percent: int = 5
+    # Cap on this domain's training windows, drawn after the holdout split (None: use all)
+    max_train_windows: int | None = None
+    max_train_windows_seed: int = 0
 
 
 def resample_indices(num_frames: int, fps: float, target_fps: float) -> torch.Tensor:
@@ -184,6 +187,20 @@ def split_holdout(dataset: PANMotionDataset, holdout_percent: int = 5) -> Tuple[
     )
 
 
+def limit_windows(dataset: PANMotionDataset, max_windows: int | None, seed: int = 0) -> PANMotionDataset:
+    """ A seeded random subset of at most `max_windows` windows, kept in temporal order. """
+    if max_windows is None:
+        return dataset
+    if isinstance(max_windows, bool) or not isinstance(max_windows, int) or max_windows < 1:
+        raise ValueError(f"max_train_windows must be a positive integer or None, got {max_windows}")
+    if max_windows >= len(dataset):
+        return dataset
+
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randperm(len(dataset), generator=generator)[:max_windows]
+    return dataset.subset(indices.sort().values)
+
+
 def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDataset], Dict[str, PANMotionDataset]]:
     train_datasets, holdout_datasets = {}, {}
     for name, group_cfg in dataset_cfg.items():
@@ -193,5 +210,8 @@ def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDa
         dataset = build_from_collections(collections, config)
         print(f"[PANData] {name}: {len(dataset)} windows, {dataset.num_banks} skeleton banks")
 
-        train_datasets[name], holdout_datasets[name] = split_holdout(dataset, config.holdout_percent)
+        train, holdout_datasets[name] = split_holdout(dataset, config.holdout_percent)
+        train_datasets[name] = limit_windows(train, config.max_train_windows, config.max_train_windows_seed)
+        if config.max_train_windows is not None:
+            print(f"[PANData] {name}: training on {len(train_datasets[name])} of {len(train)} training windows")
     return train_datasets, holdout_datasets
