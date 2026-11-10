@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -13,7 +14,7 @@ from motion_retargeting.data.visualization.visualize import visualize_motion
 
 from .config import DomainSpec, PANConfig, PANModelConfig
 from .kinematics import end_effector_velocity
-from .losses import discriminator_loss, end_effector_terms, generator_adversarial_loss
+from .losses import discriminator_loss, end_effector_terms, generator_adversarial_loss, mapped_root_velocity
 from .model import PANModel
 from .utils import (
     ForwardState,
@@ -62,7 +63,7 @@ class PANMethod(RetargetingMethod):
                 self.cfg.replay_buffer_size,
                 self.cfg.swap_probability,
             )
-            for domain in self.domain_specs
+            for domain in self.domain_specs if not self.model.is_reference
         }
 
         self.num_steps = 0
@@ -147,6 +148,8 @@ class PANMethod(RetargetingMethod):
     def validation_step(self, batch: Dict[str, Dict[str, torch.Tensor]]) -> Dict[str, float]:
         state = self.forward_state(batch)
         domains = self.model.domains
+        if self.model.is_reference:
+            return self.reference_validation_metrics(state)
         metrics = {}
 
         for name, source in state.sources.items():
@@ -171,6 +174,20 @@ class PANMethod(RetargetingMethod):
                 prefix + "cycle_squared_error_over_height2": squared_error_over_height2(cycle, positions, heights),
             })
 
+        return metrics
+
+    def reference_validation_metrics(self, state: ForwardState) -> Dict[str, float]:
+        metrics = {}
+        for name, source in state.sources.items():
+            domain = self.model.domains[name]
+            selected = self.domain_specs[name].reference.position_indices
+            target = domain.fk.world_positions(source.bones)[:, :, selected]
+            other = next(key for key in self.model.domains if key != name)
+            for label, bones in (("reconstruction", source.reconstruction_bones),
+                                 ("cycle", state.pairs[(name, other)].cycle_bones)):
+                positions = domain.fk.world_positions(bones)[:, :, selected]
+                metrics[f"{name}/val/{label}_selected_mse_cm2"] = F.mse_loss(positions, target).item()
+                metrics[f"{name}/val/{label}_selected_mpjpe_m"] = mpjpe(positions * .01, target * .01)
         return metrics
 
     def set_discriminator_requires_grad(self, requires_grad: bool) -> None:
@@ -217,6 +234,8 @@ class PANMethod(RetargetingMethod):
         return velocity / modules.heights[bank_ids][:, None, None, None]
 
     def compute_generator_losses(self, state: ForwardState) -> Dict[str, torch.Tensor]:
+        if self.model.is_reference:
+            return self.compute_reference_generator_losses(state)
         cfg = self.cfg
         losses = {}
 
@@ -262,11 +281,49 @@ class PANMethod(RetargetingMethod):
 
         return losses
 
+    def compute_reference_generator_losses(self, state: ForwardState) -> Dict[str, torch.Tensor]:
+        """norm_rec objective; cm FK, saved domain statistics, two cross routes only."""
+        cfg, losses, positions = self.cfg, {}, {}
+        for name, source in state.sources.items():
+            domain, spec = self.model.domains[name], self.domain_specs[name]
+            reference = spec.reference
+            shape = (*source.motion.shape[:2], spec.num_joints, 4)
+            selected = reference.rotation_indices
+            losses[f"{name}/reconstruction"] = cfg.reconstruction_lambda * F.mse_loss(
+                source.reconstruction[..., :-4].reshape(shape)[:, :, selected],
+                source.motion[..., :-4].reshape(shape)[:, :, selected],
+            )
+            losses[f"{name}/root"] = cfg.reconstruction_lambda * cfg.root_lambda * F.mse_loss(
+                source.reconstruction[..., -4:], source.motion[..., -4:],
+            )
+            positions[name] = domain.fk.world_positions(source.bones)[:, :, reference.position_indices]
+            losses[f"{name}/position"] = cfg.reconstruction_lambda * cfg.position_lambda * F.mse_loss(
+                domain.fk.world_positions(source.reconstruction_bones)[:, :, reference.position_indices], positions[name],
+            )
+        for (source, destination), pair in state.pairs.items():
+            route = f"{source}_to_{destination}"
+            output = state.outputs.pairs[(source, destination)]
+            src_ref, dst_ref = self.domain_specs[source].reference, self.domain_specs[destination].reference
+            losses[f"{route}/latent_cycle"] = cfg.cycle_lambda * F.mse_loss(output.fake_code, state.outputs.motion_codes[source])
+            losses[f"{route}/position_cycle"] = cfg.cycle_lambda * F.mse_loss(
+                self.model.domains[source].fk.world_positions(pair.cycle_bones)[:, :, src_ref.position_indices], positions[source],
+            )
+            original = state.sources[source].denormalized
+            fake = self.model.domains[destination].denormalize(output.fake, pair.target_ids)
+            losses[f"{route}/root_velocity"] = cfg.root_velocity_lambda * F.mse_loss(
+                mapped_root_velocity(original[..., -4:-1], src_ref.min_velocity, src_ref.max_velocity),
+                mapped_root_velocity(fake[..., -4:-1], dst_ref.min_velocity, dst_ref.max_velocity),
+            )
+            losses[f"{route}/yaw"] = cfg.root_velocity_lambda * F.mse_loss(original[..., -1:], fake[..., -1:])
+        losses.update({name: cfg.adversarial_lambda * loss for name, loss in self.compute_adversarial_losses(state).items()})
+        return losses
+
     def compute_adversarial_losses(self, state: ForwardState) -> Dict[str, torch.Tensor]:
         losses = {}
         for (source, destination), pair in state.pairs.items():
             if source != destination:
-                scores = self.model.domains[destination].discriminator(pair.fake_bones)
+                domain = self.model.domains[destination]
+                scores = domain.discriminator(domain.discriminator_input(pair.fake_bones))
                 losses[f"{source}_to_{destination}/adversarial"] = generator_adversarial_loss(scores)
         return losses
 
@@ -274,11 +331,13 @@ class PANMethod(RetargetingMethod):
         losses = {}
         for (source, destination), pair in state.pairs.items():
             if source != destination:
-                discriminator = self.model.domains[destination].discriminator
-                fake = self.buffers[destination].query(pair.fake_bones.detach())
+                domain = self.model.domains[destination]
+                fake = domain.discriminator_input(pair.fake_bones).detach()
+                if not self.model.is_reference:
+                    fake = self.buffers[destination].query(fake)
                 losses[f"{destination}/discriminator"] = discriminator_loss(
-                    discriminator(state.sources[destination].bones),
-                    discriminator(fake),
+                    domain.discriminator(domain.discriminator_input(state.sources[destination].bones)),
+                    domain.discriminator(fake),
                 )
         return losses
 
@@ -300,11 +359,12 @@ class PANMethod(RetargetingMethod):
             if source == destination:
                 continue
 
+            scale = .01 if self.model.is_reference else 1
             positions, parents = side_by_side(
-                domains[source].fk.world_positions(state.sources[source].bones)[0],
-                self.domain_specs[source].parents,
-                domains[destination].fk.world_positions(pair.fake_bones)[0],
-                self.domain_specs[destination].parents,
+                domains[source].fk.world_positions(state.sources[source].bones)[0] * scale,
+                torch.tensor(domains[source].fk.parents),
+                domains[destination].fk.world_positions(pair.fake_bones)[0] * scale,
+                torch.tensor(domains[destination].fk.parents),
             )
             visualize_motion(
                 positions,
@@ -314,6 +374,27 @@ class PANMethod(RetargetingMethod):
             )
 
     def checkpoint_metadata(self) -> Dict[str, Any]:
+        if self.model.is_reference:
+            return {
+                "representation": "lafan1_dog_reference_archive_v1",
+                "root_frame": "heading_removed_local_velocity_inclusive_sum",
+                "physical_units": "centimeters",
+                "normalization_scope": "saved_reference_train_and_test_domain_statistics",
+                "routes": "cross_only_destination_batch_skeletons",
+                "discriminator": "raw_scores_all_integrated_positions_with_end_sites",
+                "domains": {
+                    name: {"kind": spec.reference.kind, "parents": spec.parents.tolist(),
+                           "parents_withend": spec.reference.parents_withend.tolist(),
+                           "not_end": spec.reference.not_end.tolist(), "body_parts": spec.parts,
+                           "num_skeleton_banks": spec.num_banks,
+                           "min_velocity": spec.reference.min_velocity, "max_velocity": spec.reference.max_velocity,
+                           "statistics_sha256": spec.reference.statistics_sha256,
+                           "skeleton_banks_sha256": hashlib.sha256(
+                               spec.offsets.cpu().numpy().tobytes() + spec.reference.offsets_withend.cpu().numpy().tobytes()
+                           ).hexdigest()}
+                    for name, spec in self.domain_specs.items()
+                },
+            }
         return {
             "representation": "joint_local_quaternions_root_velocity_xyz_yaw",
             "root_frame": "world_heading_kept_exclusive_velocity_sum",

@@ -3,7 +3,8 @@ PAN's joint forward kinematics, following the LAFAN1/dog quaternion hierarchy.
 
 The bone ending at joint i is rotated by its parent's accumulated rotation. Each joint has one
 local quaternion, shared by all its outgoing bones; a leaf rotation does not move its own position.
-Root heading and world-frame displacement retain this implementation's existing conventions.
+Defaults keep root heading and exclusive world-displacement integration. The opt-in reference
+path removes heading upstream, integrates local displacement inclusively, and expands End Sites.
 
 The losses use three distinct position spaces, named here rather than folded into one "global
 positions" helper:
@@ -26,8 +27,10 @@ END_EFFECTOR_VELOCITY_SCALE = 10.0
 
 
 class JointForwardKinematics:
-    def __init__(self, parents: Sequence[int]):
+    def __init__(self, parents: Sequence[int], inclusive_velocity: bool = False, not_end: Sequence[int] | None = None):
         self.parents = [int(parent) for parent in parents]
+        self.inclusive_velocity = inclusive_velocity
+        self.not_end = list(not_end) if not_end is not None else None
 
     def bone_vectors_with_absolute_root(self, motion: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
         """
@@ -36,16 +39,24 @@ class JointForwardKinematics:
         returns: [B, T, J, 3]
         """
         B, T, _ = motion.shape
-        if motion.shape[-1] != 4 * len(self.parents) + 4:
+        num_rotations = len(self.parents) if self.not_end is None else len(self.not_end)
+        if motion.shape[-1] != 4 * num_rotations + 4:
             raise ValueError("PAN joint motion must have 4J + 4 channels; rebuild legacy edge data")
-        rotations = quat_normalize(motion[..., :-4].reshape(B, T, len(self.parents), 4))
+        rotations = quat_normalize(motion[..., :-4].reshape(B, T, num_rotations, 4))
+        if self.not_end is not None:
+            expanded = motion.new_zeros(B, T, len(self.parents), 4)
+            expanded[..., 0] = 1
+            expanded[..., self.not_end, :] = rotations
+            rotations = expanded
         offsets = offsets[:, None].expand(-1, T, -1, -1)
 
         accumulated = [rotations[:, :, 0]]
         # Frame t carries the step t -> t + 1, so the position at t is the sum of the earlier steps; the
-        # first frame is the origin. The yaw rate is not needed, the heading being in the root rotation.
+        # first frame is the origin by default. Reference FK instead includes the current step;
+        # its canonical training trajectory deliberately does not reintegrate the removed yaw.
         linear_velocity = motion[..., -4:-1]
-        vectors = [torch.cumsum(linear_velocity, dim=1) - linear_velocity]
+        root = torch.cumsum(linear_velocity, dim=1)
+        vectors = [root if self.inclusive_velocity else root - linear_velocity]
         for joint in range(1, len(self.parents)):
             parent_rotation = accumulated[self.parents[joint]]
             vectors.append(quat_apply(parent_rotation, offsets[:, :, joint]))

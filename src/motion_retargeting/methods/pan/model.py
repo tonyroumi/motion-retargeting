@@ -33,10 +33,19 @@ class PANDomain(nn.Module):
         self.register_buffer("offsets", spec.offsets)
         self.register_buffer("mean", spec.mean)
         self.register_buffer("std", spec.std)
-        self.register_buffer("heights", spec.heights)
-
-        self.fk = JointForwardKinematics(spec.parents.tolist())
-        self.ee_ids = spec.ee_ids
+        self.is_reference = spec.reference is not None
+        if self.is_reference:
+            reference = spec.reference
+            self.register_buffer("heights", None)
+            self.register_buffer("fk_offsets", reference.offsets_withend)
+            self.fk = JointForwardKinematics(
+                reference.parents_withend.tolist(), inclusive_velocity=True, not_end=reference.not_end.tolist()
+            )
+            self.ee_ids = []
+        else:
+            self.register_buffer("heights", spec.heights)
+            self.fk = JointForwardKinematics(spec.parents.tolist())
+            self.ee_ids = spec.ee_ids
 
         parts = spec.parts
         conv_mask = temporal_conv_mask(parts, spec.num_tokens)
@@ -62,7 +71,8 @@ class PANDomain(nn.Module):
             **asdict(cfg.motion_decoder),
         )
         self.discriminator = MotionDiscriminator(
-            input_dim=spec.num_joints * 3,
+            input_dim=len(self.fk.parents) * 3,
+            raw_scores=self.is_reference,
             **asdict(cfg.motion_discriminator),
         )
 
@@ -72,7 +82,12 @@ class PANDomain(nn.Module):
 
     def bones(self, motion: torch.Tensor, bank_ids: torch.Tensor) -> torch.Tensor:
         """ Normalized motion -> bone_vectors_with_absolute_root on each sample's bank. """
-        return self.fk.bone_vectors_with_absolute_root(self.denormalize(motion, bank_ids), self.offsets[bank_ids])
+        offsets = self.fk_offsets if self.is_reference else self.offsets
+        return self.fk.bone_vectors_with_absolute_root(self.denormalize(motion, bank_ids), offsets[bank_ids])
+
+    def discriminator_input(self, bones: torch.Tensor) -> torch.Tensor:
+        """Reference: all integrated positions in cm, including End Sites; legacy: bones."""
+        return self.fk.world_positions(bones) if self.is_reference else bones
 
 
 class PANModel(nn.Module):
@@ -86,6 +101,10 @@ class PANModel(nn.Module):
 
         self.cfg = cfg
         self.specs = domain_specs
+        reference_kinds = [spec.reference.kind for spec in domain_specs.values() if spec.reference is not None]
+        self.is_reference = bool(reference_kinds)
+        if self.is_reference and (len(domain_specs) != 2 or sorted(reference_kinds) != ["dog", "lafan1"]):
+            raise ValueError("Reference PAN requires exactly one lafan1 and one dog archive domain")
         self.domains = nn.ModuleDict(
             {name: PANDomain(cfg, spec) for name, spec in domain_specs.items()}
         )
@@ -98,9 +117,13 @@ class PANModel(nn.Module):
         """
         batch: {domain: {"motion": [B, T, 4J + 4], "bank_id": [B]}}
 
-        Reconstructs every domain, then runs all four source -> destination routes, each with a
-        uniformly drawn target bank per sample and independently of how many clips a bank has.
+        Reconstructs every domain. Legacy: all four routes with uniformly drawn target banks.
+        Reference archives: exactly two cross routes using each destination batch's banks.
         """
+        if self.is_reference and (
+            set(batch) != set(self.domains) or len({item["motion"].shape[0] for item in batch.values()}) != 1
+        ):
+            raise ValueError("Reference cross routes require equally sized destination batches")
         skeleton_codes = {
             name: domain.body_part_encoder(domain.offsets)
             for name, domain in self.domains.items()
@@ -116,7 +139,12 @@ class PANModel(nn.Module):
             source_codes = skeleton_codes[source][batch[source]["bank_id"]]
             motion_code = motion_codes[source]
             for destination, domain in self.domains.items():
-                target_ids = torch.randint(domain.offsets.shape[0], (motion_code.shape[0],), device=motion_code.device)
+                if self.is_reference:
+                    if source == destination:
+                        continue
+                    target_ids = batch[destination]["bank_id"]
+                else:
+                    target_ids = torch.randint(domain.offsets.shape[0], (motion_code.shape[0],), device=motion_code.device)
 
                 fake = self.decode(destination, motion_code, skeleton_codes[destination][target_ids])
                 fake_code = domain.motion_encoder(fake)

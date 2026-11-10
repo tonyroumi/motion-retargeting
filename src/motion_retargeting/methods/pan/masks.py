@@ -86,8 +86,8 @@ def parts_to_parts(num_parts: int, in_per_part: int, out_per_part: int) -> torch
 def parts_to_tokens(mask: torch.Tensor, channels_per_part: int, channels_per_token: int) -> torch.Tensor:
     """
     Connectivity [tokens * out, P * in] of the final decoder layer. An output token owned by several
-    parts reads all of them; one owned by none reads everything (the official code's fallback for
-    fresh training, not the zero row its published checkpoints hold).
+    parts reads all of them; one owned by none reads everything (the official code's fallback,
+    also present in the LAFAN1/Dog epoch-5000 checkpoints).
     """
     token_mask = mask.t()  # [tokens, P]
     uncovered = ~token_mask.any(dim=1)

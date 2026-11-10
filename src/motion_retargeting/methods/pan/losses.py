@@ -14,6 +14,16 @@ def discriminator_loss(real_scores: torch.Tensor, fake_scores: torch.Tensor) -> 
     return 0.5 * (real_loss + fake_loss)
 
 
+def mapped_root_velocity(velocity: torch.Tensor, minimum: float, maximum: float) -> torch.Tensor:
+    """Reference speed-range mapping, preserving direction (no clamp/extrapolation limit).
+
+    Zero speed is undefined in the reference; preserve that singularity rather than
+    silently change the objective. The training finite-loss check rejects it.
+    """
+    speed = torch.linalg.vector_norm(velocity, dim=-1, keepdim=True)
+    return ((speed - minimum) / (maximum - minimum)) * velocity / speed
+
+
 def end_effector_terms(
     source_velocity: torch.Tensor,
     fake_velocity: torch.Tensor,

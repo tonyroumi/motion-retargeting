@@ -11,6 +11,7 @@ from motion_retargeting.modules.encoders import MotionEncoderConfig
 
 from .kinematics import end_effector_ids, path_heights
 from .masks import labeled_parts
+from .reference import PARTS, ReferenceData
 
 if TYPE_CHECKING:
     from .data import PANMotionDataset
@@ -20,19 +21,25 @@ if TYPE_CHECKING:
 class DomainSpec:
     """ One domain: its topology and skeleton banks, validated on construction. """
     parents: torch.Tensor  # [J], root first with parent -1
-    offsets: torch.Tensor  # [K, J, 3], metres
+    offsets: torch.Tensor  # [K, J, 3], metres (reference archives: cm)
     mean: torch.Tensor     # [K, 4J + 4]
     std: torch.Tensor      # [K, 4J + 4]
     body_joints: Dict[int, List[int]]  # the topology's manually labeled body parts
+    reference: ReferenceData | None = None
 
     def __post_init__(self):
-        labeled_parts(self.body_joints, self.num_joints)
+        if self.reference is None:
+            labeled_parts(self.body_joints, self.num_joints)
+        elif self.body_joints != dict(enumerate(PARTS[self.reference.kind])):
+            raise ValueError("Reference PAN requires its exact three partial correspondence lists")
         expected = (self.num_banks, 4 * self.num_tokens)
         if self.mean.shape != expected or self.std.shape != expected:
             raise ValueError(f"PAN joint statistics must have shape {expected}; rebuild legacy edge data")
 
     @property
     def parts(self) -> List[List[int]]:
+        if self.reference is not None:
+            return [list(part) for part in PARTS[self.reference.kind]]
         return labeled_parts(self.body_joints, self.num_joints)
 
     @property
@@ -66,9 +73,10 @@ class DomainSpec:
         return cls(
             parents=dataset.parents,
             offsets=dataset.offsets,
-            mean=dataset.mean,
-            std=dataset.std,
+            mean=dataset.mean.float() if dataset.reference is not None else dataset.mean,
+            std=dataset.std.float() if dataset.reference is not None else dataset.std,
             body_joints=dataset.body_joints,
+            reference=dataset.reference,
         )
 
 
@@ -84,6 +92,7 @@ class PANConfig:
     position_lambda: float = 100.0
     cycle_lambda: float = 2.5
     adversarial_lambda: float = 1.0
+    root_velocity_lambda: float = 1000.0  # Reference-only: mapped XYZ + denormalized yaw
     end_effector_lambda: float = 50.0
     contact_lambda: float = 100.0  # On top of end_effector_lambda
     contact_threshold: float = 0.008  # Source, normalized, scaled end-effector velocity norm
