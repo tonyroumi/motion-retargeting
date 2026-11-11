@@ -15,6 +15,7 @@ rotation is an upright character):
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
@@ -42,45 +43,31 @@ class BANDAIAdapter(MotionSourceAdapter):
     def _extract(self) -> List[MotionData]:
         files = sorted(p for p in self.raw_dir.rglob("*.bvh"))
 
-        import bvhio
         from tqdm import tqdm
 
-        motions: List[MotionData] = []
+        return [self._read_clip(path) for path in tqdm(files, desc="Extracting BANDAI Data")]
 
-        for bvh_file in tqdm(files, desc="Extracting BANDAI Data"):
-            data = bvhio.readAsBvh(str(bvh_file))
+    def _read_clip(self, path: Path) -> MotionData:
+        import bvhio
 
-            joints, parents = flatten_hierarchy(data.Root.Children[0])
-
-            offsets = rest_offsets(joints)
-
-            # bvhio quaternions iterate as (w, x, y, z).
-            joint_rotations = torch.as_tensor(
-                [[list(pose.Rotation) for pose in joint.Keyframes] for joint in joints],
-                dtype=torch.float32,
-            ).transpose(0, 1)  # [T, J, 4]
-
-            # `joint_Root` never rotates, so its translation adds directly to the `Hips` channels.
-            root_position = CENTIMETERS_TO_METERS * (
-                keyframe_positions(data.Root) + keyframe_positions(joints[0])
-            )
-
-            joint_rotations, offsets = uprighten_root(joint_rotations, offsets, parents)
-
-            joint_rotations[:, 0] = zforward_to_xforward_quaternion(joint_rotations[:, 0])
-
-            motion = self._construct_motion(
-                parents=parents,
-                offsets=offsets,
-                joint_rotations=joint_rotations,
-                root_position=zforward_to_xforward_vector(root_position),
-                fps=float(round(1.0 / data.FrameTime)),  # FrameTime is a rounded 0.0333333
-                joint_names=[joint.Name for joint in joints],
-            )
-
-            motions.append(motion)
-
-        return motions
+        data = bvhio.readAsBvh(str(path))
+        joints, parents = flatten_hierarchy(data.Root.Children[0])
+        offsets = rest_offsets(joints)
+        joint_rotations = torch.as_tensor(
+            [[list(pose.Rotation) for pose in joint.Keyframes] for joint in joints],
+            dtype=torch.float32,
+        ).transpose(0, 1)
+        # `joint_Root` never rotates, so its translation adds to the Hips channels.
+        root_position = CENTIMETERS_TO_METERS * (
+            keyframe_positions(data.Root) + keyframe_positions(joints[0])
+        )
+        joint_rotations, offsets = uprighten_root(joint_rotations, offsets, parents)
+        joint_rotations[:, 0] = zforward_to_xforward_quaternion(joint_rotations[:, 0])
+        return self._construct_motion(
+            parents=parents, offsets=offsets, joint_rotations=joint_rotations,
+            root_position=zforward_to_xforward_vector(root_position),
+            fps=float(round(1.0 / data.FrameTime)), joint_names=[joint.Name for joint in joints],
+        )
 
 
 def flatten_hierarchy(root) -> Tuple[list, List[int]]:

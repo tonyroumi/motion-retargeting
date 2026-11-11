@@ -7,6 +7,7 @@ MotionData carries its subject's offsets.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List
 
 import numpy as np
@@ -26,12 +27,14 @@ class AMASSAdapter(MotionSourceAdapter):
         self,
         model_type: str = "smplh",
         num_betas: int = 16,
-        device: str = "cpu"
+        device: str = "cpu",
+        body_models: str | Path | None = None,
     ):
         super().__init__("amass", device=device)
 
         self.model_type = model_type
         self.num_betas = num_betas
+        self.body_models = PATHS.body_models if body_models is None else Path(body_models).expanduser()
 
         self._bms = {}
         
@@ -41,55 +44,35 @@ class AMASSAdapter(MotionSourceAdapter):
 
         from tqdm import tqdm
 
-        motions: List[MotionData] = []
+        return [self._read_clip(path) for path in tqdm(files, desc="Extracting AMASS Data")]
 
-        for npz_file in tqdm(files, desc="Extracting AMASS Data"):
-            data = np.load(npz_file)
-            
+    def _read_clip(self, path: Path, dtype: torch.dtype = torch.float32) -> MotionData:
+        """Read one clip without touching caches; optional FP64 preserves source motion precision."""
+        with np.load(path) as data:
             bm = self._body_model(np.asarray(data["gender"]).item())
-
             fps = float(data.get("mocap_framerate", 30.0))
-            poses = torch.as_tensor(data["poses"], dtype=torch.float32, device=self.device)
-            trans = torch.as_tensor(data["trans"], dtype=torch.float32, device=self.device)
+            poses = torch.as_tensor(data["poses"], dtype=dtype, device=self.device)
+            trans = torch.as_tensor(data["trans"], dtype=dtype, device=self.device)
             betas = torch.as_tensor(data["betas"], dtype=torch.float32, device=self.device)
 
-            num_frames = poses.shape[0]
-
-            parents = bm.kintree_table[0].long()[:self.NUM_JOINTS] # Clip fingers
-
-            J0 = bm(betas=betas.unsqueeze(0)).Jtr[0, :self.NUM_JOINTS]
-            offsets = torch.zeros_like(J0)
-            offsets[1:] = J0[1:] - J0[parents[1:]]  # Parent-relative offsets (root offset zero)
-
-            rots = poses.reshape(num_frames, -1, 3)
-
-            quat_rotations = axis_angle_to_quaternion(rots)
-
-            root_positions = J0[0] + trans
-            root_rotation = quat_rotations[:, 0]
-
-            # Z-up -> canonical Y-up
-            root_positions_yup = zup_to_yup_vector(root_positions)
-            root_rotation_yup = zup_to_yup_quaternion(root_rotation)
-            joint_rotations = quat_rotations[:, :self.NUM_JOINTS] # Remove the root and clip fingers
-            joint_rotations[:, 0] = root_rotation_yup
-
-            motion = self._construct_motion(
-                parents=parents,
-                offsets=offsets,
-                joint_rotations=joint_rotations,
-                root_position=root_positions_yup,
-                fps=fps,
-            )
-
-            motions.append(motion)
-
-        return motions
+        parents = bm.kintree_table[0].long()[:self.NUM_JOINTS]
+        # The installed body model is FP32; motion channels need not be quantized to it.
+        with torch.no_grad():
+            J0 = bm(betas=betas.unsqueeze(0)).Jtr[0, :self.NUM_JOINTS].to(dtype)
+        offsets = torch.zeros_like(J0)
+        offsets[1:] = J0[1:] - J0[parents[1:]]
+        quat_rotations = axis_angle_to_quaternion(poses.reshape(len(poses), -1, 3))
+        joint_rotations = quat_rotations[:, :self.NUM_JOINTS].clone()
+        joint_rotations[:, 0] = zup_to_yup_quaternion(quat_rotations[:, 0])
+        return self._construct_motion(
+            parents=parents, offsets=offsets, joint_rotations=joint_rotations,
+            root_position=zup_to_yup_vector(J0[0] + trans), fps=fps, dtype=dtype,
+        )
 
     def _body_model(self, gender: str):
         if gender not in self._bms:
             from human_body_prior.body_model.body_model import BodyModel
-            bm_path = str(PATHS.body_models / self.model_type / gender / "model.npz")
+            bm_path = str(self.body_models / self.model_type / gender / "model.npz")
             self._bms[gender] = BodyModel(
                 bm_path,
                 model_type=self.model_type,
@@ -124,7 +107,7 @@ def zup_to_yup_quaternion(q: torch.Tensor) -> torch.Tensor:
         math.sin(-math.pi / 4),  # x
         0.0,
         0.0,
-    ])
+    ], dtype=q.dtype, device=q.device)
     return quat_mul(q_convert, q)
 
 

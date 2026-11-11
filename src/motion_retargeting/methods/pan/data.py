@@ -71,8 +71,10 @@ class PANMotionDataset(Dataset):
         parents: torch.Tensor,
         body_joints: Dict[int, List[int]],
         reference: ReferenceData | None = None,
+        provenance: Dict[str, Any] | None = None,
     ):
         self.reference = reference
+        self.provenance = provenance
         self.motion = motion  # [N, W, 4J + 4], un-normalized
         self.bank_ids = bank_ids  # [N]
         self.offsets = offsets  # [K, J, 3], metres (reference archives: cm)
@@ -96,6 +98,7 @@ class PANMotionDataset(Dataset):
             parents=self.parents,
             body_joints=self.body_joints,
             reference=self.reference,
+            provenance=self.provenance,
         )
 
     def normalize(self, motion: torch.Tensor, bank_id: torch.Tensor) -> torch.Tensor:
@@ -211,6 +214,19 @@ def limit_windows(dataset: PANMotionDataset, max_windows: int | None, seed: int 
 
 def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDataset], Dict[str, PANMotionDataset]]:
     train_datasets, holdout_datasets = {}, {}
+    if any("human_reference_style" in group for group in dataset_cfg.values()):
+        from .human_reference import load_human_reference_splits
+
+        if len(dataset_cfg) != 2 or any(set(group) != {"human_reference_style"} for group in dataset_cfg.values()):
+            raise ValueError("human_reference_style requires two explicit domains without generic/archive mixing")
+        profiles = [group["human_reference_style"] for group in dataset_cfg.values()]
+        if sorted(profile["source"] for profile in profiles) != ["amass", "cmu"]:
+            raise ValueError("human_reference_style requires one AMASS and one CMU source")
+        if set(profiles[0]["test_subjects"]) != set(profiles[1]["test_subjects"]):
+            raise ValueError("CMU-derived domains must use the same held-out subjects to avoid cross-domain leakage")
+        for name, group in dataset_cfg.items():
+            train_datasets[name], holdout_datasets[name] = load_human_reference_splits(**group["human_reference_style"])
+        return train_datasets, holdout_datasets
     dataset_cfg = dict(dataset_cfg)
     for name, group in dataset_cfg.items():
         sources = group.get("sources", [])

@@ -352,7 +352,7 @@ def test_upstream_objective_discriminator_and_generator_gradients(upstream, meth
     recorded, upstream_models = {}, []
     for name in names:
         domain = method.model.domains[name]
-        ref_dis = LatentDiscriminator(3, 3, 81, 16)
+        ref_dis = LatentDiscriminator(3, 3, len(domain.fk.parents) * 3, 16)
         for dst, src in zip(ref_dis.layers, (domain.discriminator.conv1, domain.discriminator.conv2, domain.discriminator.conv3)):
             dst[0].load_state_dict(src.state_dict())
         ref_dis.requires_grad_(False)

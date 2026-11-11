@@ -155,8 +155,11 @@ The unmodified `backward_G` AST is isolated from unrelated obsolete Mixamo impor
 (`numpy.core.umath_tests`); discriminator weights are copied for score/gradient
 parity. This is not full learned-checkpoint forward/update parity.
 
-Still unmatched/out of scope: the trainer's min-domain sampler/partial batches
-versus human-driven dog recycling/drop-last; historical RNG/initialization and
+The existing LAFAN1/Dog example configs still select the legacy min-domain
+sampler/partial batches rather than human-driven dog recycling/drop-last. An
+opt-in `primary_recycle` sampler is now available (used by the separately labeled
+CMU/AMASS experiment), but these examples have not silently changed schedules.
+Still unmatched/out of scope: historical RNG/initialization and
 optimizer-step exposure; full pretrained weight import;
 full-clip heading restoration/export/IK cleanup; convergence and visual quality.
 The skeleton encoder still stores a masked zero root-offset input column, so its
@@ -196,6 +199,12 @@ MotionCollections to generic PAN, not that reference edge/absolute-position mode
 A separate Mixamo model path is intentionally not implemented. Only synthetic
 Mixamo adapter fixtures were tested because no real Mixamo corpus was available.
 No adapter selection alone promises identical training results.
+
+For an explicitly adapted human/human experiment borrowing this objective and
+preprocessing, see `docs/pan_cmu_amass_lafan_style.md` and
+`configs/methods/pan_cmu_amass_lafan_style.yaml`. It is not a new published reference
+benchmark. For side-by-side source/adapter/training-coordinate and exported-NPZ
+inspection without Isaac Lab, see `docs/visualize.md`.
 
 Known pre-existing regression issue: `tests/test_pan_root_loss.py` expects an
 integrated, height-normalized legacy root loss, but that term is already absent

@@ -67,6 +67,7 @@ class MotionSourceAdapter(ABC):
         root_position,
         fps: float,
         joint_names: Optional[List[str]] = None,
+        dtype: torch.dtype = torch.float32,
     ) -> MotionData:
         """
         Build one clip's MotionData from its canonical (Y-up) data.
@@ -80,9 +81,9 @@ class MotionSourceAdapter(ABC):
         parts are labeled interactively, once); later clips must have the same parents / names.
         """
         parents = torch.as_tensor(parents, dtype=torch.long, device=self.device)
-        offsets = torch.as_tensor(offsets, dtype=torch.float32, device=self.device)
-        joint_rotations = torch.as_tensor(joint_rotations, dtype=torch.float32, device=self.device)
-        root_position = torch.as_tensor(root_position, dtype=torch.float32, device=self.device)
+        offsets = torch.as_tensor(offsets, dtype=dtype, device=self.device)
+        joint_rotations = torch.as_tensor(joint_rotations, dtype=dtype, device=self.device)
+        root_position = torch.as_tensor(root_position, dtype=dtype, device=self.device)
 
         if self._topology is None:
             self._topology = SkeletonTopology(

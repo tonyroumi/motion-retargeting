@@ -103,8 +103,12 @@ class PANModel(nn.Module):
         self.specs = domain_specs
         reference_kinds = [spec.reference.kind for spec in domain_specs.values() if spec.reference is not None]
         self.is_reference = bool(reference_kinds)
-        if self.is_reference and (len(domain_specs) != 2 or sorted(reference_kinds) != ["dog", "lafan1"]):
-            raise ValueError("Reference PAN requires exactly one lafan1 and one dog archive domain")
+        if self.is_reference:
+            protocols = {spec.reference.protocol for spec in domain_specs.values() if spec.reference is not None}
+            expected = ["amass", "cmu"] if protocols == {"human_lafan_style_v1"} else ["dog", "lafan1"]
+            if (len(domain_specs) != 2 or protocols not in ({"lafan_dog"}, {"human_lafan_style_v1"})
+                    or sorted(reference_kinds) != expected):
+                raise ValueError("Reference-style PAN requires one complete lafan1/dog or experimental amass/cmu pair")
         self.domains = nn.ModuleDict(
             {name: PANDomain(cfg, spec) for name, spec in domain_specs.items()}
         )
