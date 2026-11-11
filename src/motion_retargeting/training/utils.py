@@ -62,3 +62,40 @@ class ZippedLoaders:
 
     def __len__(self) -> int:
         return min(len(loader) for loader in self.loaders.values())
+
+
+class PrimaryRecycledLoaders:
+    """Primary-driven full-batch epochs, reshuffling secondary loaders on exhaustion.
+
+    Secondary iterators survive epoch boundaries, as in reference human/dog
+    training. Never cache/replay batches with itertools.cycle. This intentionally
+    does not reproduce the upstream extra-primary-batch epoch-boundary quirk.
+    """
+
+    def __init__(self, loaders: Dict[str, DataLoader], primary: str):
+        if primary not in loaders:
+            raise ValueError(f"Unknown primary domain {primary!r}")
+        if any(not loader.drop_last or len(loader) == 0 for loader in loaders.values()):
+            raise ValueError("Primary recycling requires nonempty drop_last loaders; reduce batch_size if needed")
+        if len({loader.batch_size for loader in loaders.values()}) != 1:
+            raise ValueError("Primary recycling requires equal batch sizes")
+        self.loaders, self.primary = loaders, primary
+        self._secondary_iters = {}
+
+    def __iter__(self) -> Iterator[Dict[str, Any]]:
+        for primary_batch in self.loaders[self.primary]:
+            result = {self.primary: primary_batch}
+            for name, loader in self.loaders.items():
+                if name == self.primary:
+                    continue
+                if name not in self._secondary_iters:
+                    self._secondary_iters[name] = iter(loader)
+                try:
+                    result[name] = next(self._secondary_iters[name])
+                except StopIteration:
+                    self._secondary_iters[name] = iter(loader)
+                    result[name] = next(self._secondary_iters[name])
+            yield result
+
+    def __len__(self) -> int:
+        return len(self.loaders[self.primary])

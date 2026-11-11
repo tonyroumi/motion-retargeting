@@ -11,7 +11,7 @@ from motion_retargeting.modules.encoders import MotionEncoderConfig
 
 from .kinematics import end_effector_ids, path_heights
 from .masks import labeled_parts
-from .reference import PARTS, ReferenceData
+from .reference import ReferenceData
 
 if TYPE_CHECKING:
     from .data import PANMotionDataset
@@ -30,7 +30,7 @@ class DomainSpec:
     def __post_init__(self):
         if self.reference is None:
             labeled_parts(self.body_joints, self.num_joints)
-        elif self.body_joints != dict(enumerate(PARTS[self.reference.kind])):
+        elif self.body_joints != dict(enumerate(self.reference.parts)):
             raise ValueError("Reference PAN requires its exact three partial correspondence lists")
         expected = (self.num_banks, 4 * self.num_tokens)
         if self.mean.shape != expected or self.std.shape != expected:
@@ -39,7 +39,7 @@ class DomainSpec:
     @property
     def parts(self) -> List[List[int]]:
         if self.reference is not None:
-            return [list(part) for part in PARTS[self.reference.kind]]
+            return [list(part) for part in self.reference.parts]
         return labeled_parts(self.body_joints, self.num_joints)
 
     @property

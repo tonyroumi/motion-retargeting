@@ -16,6 +16,9 @@ from motion_retargeting.data.representations.skeleton import SkeletonTopology
 
 
 class MotionSourceAdapter(ABC):
+    # Changed physical conventions must never reuse an unversioned legacy cache.
+    cache_version: str | None = None
+
     def __init__(self, dataset_name: str, device: str = "cpu"):
         """ Setup data directories """
         data_dir = PATHS.data_root
@@ -27,10 +30,9 @@ class MotionSourceAdapter(ABC):
         self.raw_dir = data_dir / "raw" / dataset_name
         self.cache_dir = data_dir / "processed" 
 
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
         # Where a cached skeleton / the cached motion list are read from and written to.
-        self.motion_cache_path = self.cache_dir / f"{dataset_name}.pt"
+        suffix = f".{self.cache_version}" if self.cache_version else ""
+        self.motion_cache_path = self.cache_dir / f"{dataset_name}{suffix}.pt"
 
         # Joint structure shared by every clip
         self._topology: Optional[SkeletonTopology] = None
@@ -48,6 +50,7 @@ class MotionSourceAdapter(ABC):
             raise FileNotFoundError(f"{self.dataset_name}: no motion clips found under {self.raw_dir}")
 
         data = MotionCollection(topology=self._topology, motions=motions)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         torch.save(data, self.motion_cache_path)
         return data
 
@@ -64,6 +67,7 @@ class MotionSourceAdapter(ABC):
         root_position,
         fps: float,
         joint_names: Optional[List[str]] = None,
+        dtype: torch.dtype = torch.float32,
     ) -> MotionData:
         """
         Build one clip's MotionData from its canonical (Y-up) data.
@@ -77,9 +81,9 @@ class MotionSourceAdapter(ABC):
         parts are labeled interactively, once); later clips must have the same parents / names.
         """
         parents = torch.as_tensor(parents, dtype=torch.long, device=self.device)
-        offsets = torch.as_tensor(offsets, dtype=torch.float32, device=self.device)
-        joint_rotations = torch.as_tensor(joint_rotations, dtype=torch.float32, device=self.device)
-        root_position = torch.as_tensor(root_position, dtype=torch.float32, device=self.device)
+        offsets = torch.as_tensor(offsets, dtype=dtype, device=self.device)
+        joint_rotations = torch.as_tensor(joint_rotations, dtype=dtype, device=self.device)
+        root_position = torch.as_tensor(root_position, dtype=dtype, device=self.device)
 
         if self._topology is None:
             self._topology = SkeletonTopology(

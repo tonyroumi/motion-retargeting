@@ -20,7 +20,7 @@ from motion_retargeting.data.representations.motion import MotionData
 from motion_retargeting.kinematics.quaternions import quat_mul
 
 
-INCHES_TO_CENTIMETERS = 2.54
+INCHES_TO_METERS = 0.0254
 
 # Bones below the wrists are dropped
 EXCLUDED_BONES = ("lhand", "lthumb", "lfingers", "rhand", "rthumb", "rfingers")
@@ -30,6 +30,8 @@ NO_END_SITE_BONES = ("ltoes", "rtoes")
 
 
 class CMUAdapter(MotionSourceAdapter):
+    cache_version = "metres-v2"
+
     def __init__(
         self,
         device: str = "cpu",
@@ -44,34 +46,25 @@ class CMUAdapter(MotionSourceAdapter):
         from tqdm import tqdm
 
         motions: List[MotionData] = []
-
-        for amc_file in tqdm(files, desc="Extracting CMU Data"):
-
-            asf = self._asf_model(amc_file)
-
-            frames = parse_amc(amc_file)
-
-            if not frames:
-                continue
-
-            root_positions, _, local_rotations = amc_to_tensors(asf, frames)
-
-            root_positions_yup = zforward_to_xforward_vector(torch.as_tensor(root_positions))
-            root_rotation_yup = zforward_to_xforward_quaternion(torch.as_tensor(local_rotations[:, 0]))
-            local_rotations[:, 0] = root_rotation_yup
-
-            motion = self._construct_motion(
-                parents=asf.parents,
-                offsets=asf.offsets,
-                joint_rotations=local_rotations,
-                root_position=root_positions_yup,
-                fps=120.0,  # CMU reports 120 fps
-                joint_names=asf.joint_names,
-            )
-
-            motions.append(motion)
-
+        for path in tqdm(files, desc="Extracting CMU Data"):
+            motion = self._read_clip(path)
+            if motion is not None:
+                motions.append(motion)
         return motions
+
+    def _read_clip(self, path: Path, dtype: torch.dtype = torch.float32) -> MotionData | None:
+        """Read one ASF/AMC pair without touching caches or requiring a corpus conversion."""
+        asf = self._asf_model(path)
+        frames = parse_amc(path)
+        if not frames:
+            return None
+        root_positions, _, local_rotations = amc_to_tensors(asf, frames)
+        root_positions_yup = zforward_to_xforward_vector(torch.as_tensor(root_positions))
+        local_rotations[:, 0] = zforward_to_xforward_quaternion(torch.as_tensor(local_rotations[:, 0]))
+        return self._construct_motion(
+            parents=asf.parents, offsets=asf.offsets, joint_rotations=local_rotations,
+            root_position=root_positions_yup, fps=120.0, joint_names=asf.joint_names, dtype=dtype,
+        )
 
     def _asf_model(self, amc_file: Path) -> "_ASF":
         """ The parsed ASF skeleton of an AMC file's subject ("01_02.amc" -> "01.asf"), parsed once. """
@@ -160,7 +153,7 @@ def parse_asf(path: Path) -> _ASF:
                 continue
             asf.children[tokens[0]] = [child for child in tokens[1:] if child not in EXCLUDED_BONES]
 
-    asf.scale = (1.0 / length_unit) * INCHES_TO_CENTIMETERS
+    asf.scale = (1.0 / length_unit) * INCHES_TO_METERS
     for name in asf.bone_vectors:
         asf.bone_vectors[name] = asf.bone_vectors[name] * asf.scale
 

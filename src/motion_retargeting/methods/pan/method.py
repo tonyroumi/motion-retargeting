@@ -311,8 +311,10 @@ class PANMethod(RetargetingMethod):
             original = state.sources[source].denormalized
             fake = self.model.domains[destination].denormalize(output.fake, pair.target_ids)
             losses[f"{route}/root_velocity"] = cfg.root_velocity_lambda * F.mse_loss(
-                mapped_root_velocity(original[..., -4:-1], src_ref.min_velocity, src_ref.max_velocity),
-                mapped_root_velocity(fake[..., -4:-1], dst_ref.min_velocity, dst_ref.max_velocity),
+                mapped_root_velocity(original[..., -4:-1], src_ref.min_velocity, src_ref.max_velocity,
+                                     zero_safe=src_ref.protocol == "human_lafan_style_v1"),
+                mapped_root_velocity(fake[..., -4:-1], dst_ref.min_velocity, dst_ref.max_velocity,
+                                     zero_safe=dst_ref.protocol == "human_lafan_style_v1"),
             )
             losses[f"{route}/yaw"] = cfg.root_velocity_lambda * F.mse_loss(original[..., -1:], fake[..., -1:])
         losses.update({name: cfg.adversarial_lambda * loss for name, loss in self.compute_adversarial_losses(state).items()})
@@ -375,13 +377,18 @@ class PANMethod(RetargetingMethod):
 
     def checkpoint_metadata(self) -> Dict[str, Any]:
         if self.model.is_reference:
+            regenerated = any(spec.reference.statistics_source != "archive" for spec in self.domain_specs.values())
+            human_style = all(spec.reference.protocol == "human_lafan_style_v1" for spec in self.domain_specs.values())
             return {
-                "representation": "lafan1_dog_reference_archive_v1",
+                "representation": ("cmu_amass_lafan_style_v1" if human_style else
+                                   "lafan1_dog_reference_raw_v1" if regenerated else "lafan1_dog_reference_archive_v1"),
                 "root_frame": "heading_removed_local_velocity_inclusive_sum",
                 "physical_units": "centimeters",
-                "normalization_scope": "saved_reference_train_and_test_domain_statistics",
+                "normalization_scope": ("reference_train_and_test_domain_statistics_with_raw_regeneration" if regenerated
+                                        else "saved_reference_train_and_test_domain_statistics"),
                 "routes": "cross_only_destination_batch_skeletons",
-                "discriminator": "raw_scores_all_integrated_positions_with_end_sites",
+                "discriminator": ("raw_scores_all_integrated_available_positions" if human_style
+                                  else "raw_scores_all_integrated_positions_with_end_sites"),
                 "domains": {
                     name: {"kind": spec.reference.kind, "parents": spec.parents.tolist(),
                            "parents_withend": spec.reference.parents_withend.tolist(),
@@ -389,6 +396,10 @@ class PANMethod(RetargetingMethod):
                            "num_skeleton_banks": spec.num_banks,
                            "min_velocity": spec.reference.min_velocity, "max_velocity": spec.reference.max_velocity,
                            "statistics_sha256": spec.reference.statistics_sha256,
+                           **({"protocol": spec.reference.protocol,
+                               "selected_positions": spec.reference.position_indices,
+                               "heading": "rest_anatomy_cross_up_right_project_xz_atan2",
+                               "zero_speed": "exact_zero_maps_to_zero"} if human_style else {}),
                            "skeleton_banks_sha256": hashlib.sha256(
                                spec.offsets.cpu().numpy().tobytes() + spec.reference.offsets_withend.cpu().numpy().tobytes()
                            ).hexdigest()}
@@ -408,6 +419,12 @@ class PANMethod(RetargetingMethod):
                     "body_parts": spec.parts,
                     "num_skeleton_banks": spec.num_banks,
                     "end_effector_ids": spec.ee_ids,
+                    # Older generic checkpoints claimed metres even when their
+                    # AMASS/CMU banks were in cm. Do not silently restore those.
+                    "skeleton_banks_sha256": hashlib.sha256(spec.offsets.cpu().numpy().tobytes()).hexdigest(),
+                    "statistics_sha256": hashlib.sha256(
+                        spec.mean.cpu().numpy().tobytes() + spec.std.cpu().numpy().tobytes()
+                    ).hexdigest(),
                 }
                 for name, spec in self.domain_specs.items()
             },

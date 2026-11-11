@@ -1,7 +1,7 @@
 """Opt-in LAFAN1/Dog archive contract (original BVH frames, centimetres).
 
-No reference repository imports or raw-adapter/cache changes. Archive dictionaries are
-pickled NumPy objects: load only trusted reference archives.
+No reference repository imports. Archive loading never accesses raw-adapter caches.
+Archive dictionaries are pickled NumPy objects: load only trusted reference archives.
 """
 from __future__ import annotations
 
@@ -32,18 +32,28 @@ class ReferenceData:
     """Additional FK/statistics metadata unavailable in the generic motion collection."""
     kind: str
     parents_withend: torch.Tensor
-    offsets_withend: torch.Tensor  # [K, 27, 3], cm, root zero
+    offsets_withend: torch.Tensor  # [K, J_fk, 3], cm, root zero (published archives: J_fk=27)
     not_end: torch.Tensor  # rotation-bearing joint -> expanded FK joint
     min_velocity: float
     max_velocity: float
     statistics_sha256: str
+    statistics_source: str = "archive"
+    protocol: str = "lafan_dog"
+    body_parts: list[list[int]] | None = None
+    selected_positions: list[int] | None = None
+
+    @property
+    def parts(self) -> list[list[int]]:
+        return PARTS[self.kind] if self.body_parts is None else self.body_parts
 
     @property
     def rotation_indices(self) -> list[int]:
-        return [0] + [joint for part in PARTS[self.kind] for joint in part]
+        return [0] + [joint for part in self.parts for joint in part]
 
     @property
     def position_indices(self) -> list[int]:
+        if self.selected_positions is not None:
+            return self.selected_positions
         return self.not_end[self.rotation_indices].tolist() + SELECTED_ENDS[self.kind]
 
 
@@ -91,12 +101,16 @@ def preprocess_reference_window(
     offsets: torch.Tensor,
     parents: torch.Tensor,
     kind: str,
+    forward_axis: torch.Tensor | None = None,
+    stable_heading: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Canonicalize one raw window PLUS one lookahead frame, already sampled at 30 Hz.
 
     CPU, original BVH local frames, wxyz, centimetres; NOT rebased generic adapter
     tensors. Returns channels [W,4J+4] and removed heading [W,1,4]. Dog sigma=8
     smoothing is deliberately per-window, nearest-padded, never clip-wide.
+    An explicit root-local forward_axis generalizes the human math to separately
+    labeled experiments; the published LAFAN1 axis remains +Y by default.
     """
     if kind not in PARTS:
         raise ValueError(f"Unknown reference domain {kind!r}")
@@ -110,7 +124,8 @@ def preprocess_reference_window(
         global_q.append(quat_mul(global_q[parent], q[:, joint]))
     global_q = torch.stack(global_q, dim=1)
     if kind == "lafan1":
-        forward = _rotate(global_q[:, 0], q.new_tensor([0., 1., 0.]))
+        axis = q.new_tensor([0., 1., 0.]) if forward_axis is None else forward_axis.to(q)
+        forward = _rotate(global_q[:, 0], axis)
         forward = forward * q.new_tensor([1., 0., 1.])
         forward = forward / (forward.norm(dim=-1, keepdim=True) + 1e-8)
     else:
@@ -119,9 +134,19 @@ def preprocess_reference_window(
         forward = forward / forward.norm(dim=-1, keepdim=True)
         forward = torch.from_numpy(gaussian_filter1d(forward.numpy(), 8, axis=0, mode="nearest"))
         forward = forward / forward.norm(dim=-1, keepdim=True)
-    heading = torch.stack((forward.norm(dim=-1) + forward[:, 2], -forward[:, 1],
-                           forward[:, 0], torch.zeros_like(forward[:, 0])), dim=-1)
-    heading = heading / (heading.norm(dim=-1, keepdim=True) + 1e-8)
+    if stable_heading:
+        # The human experiment must handle exact 180-degree headings: the
+        # reference quaternion-between formula collapses to zero there. Keep the
+        # published path unchanged, but define the human experiment by atan2.
+        if kind != "lafan1" or (forward.norm(dim=-1) < 1e-8).any():
+            raise ValueError("Stable human heading needs a nonvertical projected forward axis")
+        half_yaw = torch.atan2(forward[:, 0], forward[:, 2]) / 2
+        zeros = torch.zeros_like(half_yaw)
+        heading = torch.stack((half_yaw.cos(), zeros, half_yaw.sin(), zeros), -1)
+    else:
+        heading = torch.stack((forward.norm(dim=-1) + forward[:, 2], -forward[:, 1],
+                               forward[:, 0], torch.zeros_like(forward[:, 0])), dim=-1)
+        heading = heading / (heading.norm(dim=-1, keepdim=True) + 1e-8)
     inverse = quat_conjugate(heading[:, None])
     canonical_global = quat_mul(inverse, global_q)
     # Reproduce the reference FK -> remove heading -> IK, including its epsilon

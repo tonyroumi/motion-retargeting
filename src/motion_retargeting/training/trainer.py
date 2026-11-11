@@ -30,6 +30,8 @@ class TrainerConfig:
     verbose: bool = True
 
     device: str = "cuda"
+    max_steps: int | None = None  # Optional exact optimizer-update budget, independent of corpus size.
+    checkpoint_interval_steps: int | None = None
 
 
 class Trainer:
@@ -52,6 +54,11 @@ class Trainer:
 
         self.current_epoch = 0
         self.global_step = 0
+        self.epoch_complete = True
+        for name in ("max_steps", "checkpoint_interval_steps"):
+            value = getattr(cfg, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+                raise ValueError(f"{name} must be a positive integer or None")
 
         self.run_dir = Path(cfg.log_dir) / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.checkpoint_dir = self.run_dir / "checkpoints"
@@ -66,6 +73,8 @@ class Trainer:
 
     def train(self) -> None:
         for epoch in range(self.current_epoch, self.cfg.num_epochs):
+            if self.cfg.max_steps is not None and self.global_step >= self.cfg.max_steps:
+                break
             self.current_epoch = epoch
 
             train_metrics = self.train_epoch()
@@ -85,11 +94,11 @@ class Trainer:
 
             if (epoch + 1) % self.cfg.checkpoint_interval == 0:
                 self.save_checkpoint(
-                    self.checkpoint_dir / f"epoch_{epoch + 1}.pt"
+                    self.checkpoint_dir / f"epoch_{epoch + 1}.pt", epoch_complete=self.epoch_complete,
                 )
 
         self.save_checkpoint(
-            self.checkpoint_dir / "final.pt"
+            self.checkpoint_dir / "final.pt", epoch_complete=self.epoch_complete,
         )
 
         self.logger.close()
@@ -98,7 +107,8 @@ class Trainer:
 
         self.method.train()
 
-        for batch in self.train_loader:
+        self.epoch_complete = False
+        for index, batch in enumerate(self.train_loader):
             batch = move_to_device(batch, self.device)
 
             metrics = self.method.train_step(batch)
@@ -109,6 +119,11 @@ class Trainer:
 
             if self.global_step % self.cfg.log_interval == 0:
                 self.logger.display(f"  step={self.global_step}", metrics)
+            self.epoch_complete = index + 1 == len(self.train_loader)
+            if self.cfg.checkpoint_interval_steps and self.global_step % self.cfg.checkpoint_interval_steps == 0:
+                self.save_checkpoint(self.checkpoint_dir / f"step_{self.global_step}.pt", epoch_complete=self.epoch_complete)
+            if self.cfg.max_steps is not None and self.global_step >= self.cfg.max_steps:
+                break
 
         return self.logger.average()
 
@@ -136,10 +151,12 @@ class Trainer:
     def save_checkpoint(
         self,
         path: str | Path,
+        epoch_complete: bool = True,
     ) -> None:
         path = Path(path)
         
         checkpoint = {
+            "epoch_complete": epoch_complete,
             "epoch": self.current_epoch,
             "global_step": self.global_step,
             "method": self.method.state_dict(),
@@ -156,5 +173,6 @@ class Trainer:
         checkpoint = torch.load(path, map_location=self.device)
         self.method.load_state_dict(checkpoint["method"])
 
-        self.current_epoch = checkpoint["epoch"] + 1
+        self.epoch_complete = checkpoint.get("epoch_complete", True)
+        self.current_epoch = checkpoint["epoch"] + int(self.epoch_complete)
         self.global_step = checkpoint["global_step"]

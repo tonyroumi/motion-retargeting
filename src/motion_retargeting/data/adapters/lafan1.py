@@ -1,13 +1,20 @@
-"""LAFAN1 human and the PAN reference dog, from centimeter, Y-up BVHs."""
+"""Generic metre MotionCollections from LAFAN1/Dog BVHs.
+
+PAN selects the separate original-frame/cm raw loader, not these rebased tensors.
+"""
 
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
+from .lafan1_splits import reference_files
 from .reference_bvh import ReferenceBVHAdapter
 
 
 class LAFAN1Adapter(ReferenceBVHAdapter):
+    cache_version = "reference-split-metres-v2"
+
     # LAFAN authors its Hips with local +X up the spine and +Y forward, so the builder's
     # heading axis would point at the ceiling. This half turn about (1, 1, 0) swaps them to
     # +X forward, +Y up, +Z right, so that a character walking forward moves along canonical +X.
@@ -19,9 +26,9 @@ class LAFAN1Adapter(ReferenceBVHAdapter):
         "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand",
         "RightShoulder", "RightArm", "RightForeArm", "RightHand",
     ]
-    # This architecture requires a complete, disjoint joint partition. Keep the
-    # same three semantic keys across human/dog: limbs, trunk, head. Unlike the
-    # reference's partial masks, arms and tail must not be left unassigned.
+    # The generic collection retains a complete, disjoint joint partition with
+    # matching human/dog keys: limbs, trunk, head. PAN's raw/reference loaders use
+    # their own partial correspondence masks instead of these generic labels.
     body_names = {
         0: joint_names[1:9] + joint_names[14:],
         1: ["Hips", "Spine", "Spine1", "Spine2"],
@@ -30,9 +37,16 @@ class LAFAN1Adapter(ReferenceBVHAdapter):
 
     def __init__(self, device: str = "cpu"):
         super().__init__("lafan1", device=device)
+        if not self.raw_dir.exists() and (self.raw_dir.parent / "LAFAN1").exists():
+            self.raw_dir = self.raw_dir.parent / "LAFAN1"
+
+    def _files(self) -> list[Path]:
+        return reference_files(self.raw_dir, "lafan1", "train")
 
 
 class DogAdapter(ReferenceBVHAdapter):
+    cache_version = "reference-split-metres-v2"
+
     # The dog's Hips has +Y up but +X pointing at its tail, with the half turn undone by `Spine`.
     # This half turn about Y gives the same frame as the human, so both domains' canonical root
     # velocities agree instead of having opposite signs.
@@ -52,3 +66,8 @@ class DogAdapter(ReferenceBVHAdapter):
 
     def __init__(self, device: str = "cpu"):
         super().__init__("dog", device=device)
+        if not self.raw_dir.exists() and (self.raw_dir.parent / "Dog").exists():
+            self.raw_dir = self.raw_dir.parent / "Dog"
+
+    def _files(self) -> list[Path]:
+        return reference_files(self.raw_dir, "dog", "train")

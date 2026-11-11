@@ -1,0 +1,61 @@
+# Prepared experiment, NOT a LAFAN1/Dog benchmark reproduction.
+# Both installed domains originate from CMU; shared subject/session holdout is essential.
+# See docs/pan_cmu_amass_lafan_style.md before launching. No training cap.
+device: cuda
+seed: 0
+
+dataset:
+  amass:
+    human_reference_style:
+      source: amass  # default data/raw/amass/CMU; only this AMASS subset is available
+      # Optional directory: /path/to/amass/CMU
+      # Optional body_models: /path/to/smplh-parent-directory
+      test_subjects: &heldout ["01", "08", "105", "111", "12", "125", "131", "137", "142", "17", "18", "19", "20", "21", "22", "23", "27", "32", "39", "46", "56", "64", "76", "82", "87", "93"]
+  cmu:
+    human_reference_style:
+      source: cmu  # default data/raw/cmu, recursive ASF/AMC discovery
+      # Optional directory: /path/to/cmu/all_asfamc/subjects
+      test_subjects: *heldout
+
+method:
+  name: pan
+  model:
+    motion_encoder:
+      embed_dim: 32
+      embed_hidden_dim: 512
+      num_layers: 1
+      num_heads: 1
+      feedforward_dim: 256
+      dropout: 0.0
+      kernel_size: 15
+    motion_decoder:
+      kernel_size: 15
+      upsample_mode: linear
+    motion_discriminator:
+      hidden_dim: 256
+      kernel_size: 15
+  params:
+    reconstruction_lambda: 1
+    root_lambda: 100
+    position_lambda: 0.01
+    cycle_lambda: 0.001
+    adversarial_lambda: 1
+    root_velocity_lambda: 1000
+
+trainer:
+  sampling: primary_recycle
+  primary_domain: amass
+  batch_size: 128
+  learning_rate: 0.0001
+  num_epochs: 5001  # ceiling only; larger human corpora reach the step budget sooner
+  # Observed step counters in BOTH installed epoch-5000 reference optimizers.
+  # This differs from 255001 derived from today's 6566-window human archive;
+  # historical data/exposure cannot be reconstructed from the epoch label alone.
+  max_steps: 335001
+  checkpoint_interval_steps: 33500  # ten checkpoints across the observed step budget
+  log_interval: 10
+  validation_interval: 25
+  checkpoint_interval: 500
+  log_dir: logs/cmu_amass_lafan_style
+  use_tensorboard: true
+  verbose: true

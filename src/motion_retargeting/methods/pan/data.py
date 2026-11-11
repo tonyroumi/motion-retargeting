@@ -15,7 +15,8 @@ from motion_retargeting.data.utils import (
     extract_heading_yup,
 )
 
-from .reference import ReferenceData, load_reference_splits
+from .reference import PARTS, ReferenceData, load_reference_splits
+from .raw_reference import load_raw_reference_splits
 
 
 @dataclass
@@ -70,8 +71,10 @@ class PANMotionDataset(Dataset):
         parents: torch.Tensor,
         body_joints: Dict[int, List[int]],
         reference: ReferenceData | None = None,
+        provenance: Dict[str, Any] | None = None,
     ):
         self.reference = reference
+        self.provenance = provenance
         self.motion = motion  # [N, W, 4J + 4], un-normalized
         self.bank_ids = bank_ids  # [N]
         self.offsets = offsets  # [K, J, 3], metres (reference archives: cm)
@@ -95,6 +98,7 @@ class PANMotionDataset(Dataset):
             parents=self.parents,
             body_joints=self.body_joints,
             reference=self.reference,
+            provenance=self.provenance,
         )
 
     def normalize(self, motion: torch.Tensor, bank_id: torch.Tensor) -> torch.Tensor:
@@ -210,16 +214,45 @@ def limit_windows(dataset: PANMotionDataset, max_windows: int | None, seed: int 
 
 def build_pan_splits(dataset_cfg: Dict[str, Any]) -> Tuple[Dict[str, PANMotionDataset], Dict[str, PANMotionDataset]]:
     train_datasets, holdout_datasets = {}, {}
-    archive_groups = [group for group in dataset_cfg.values() if "reference_archive" in group]
-    if archive_groups and (len(dataset_cfg) != 2 or len(archive_groups) != 2 or
-                           sorted(group["reference_archive"]["kind"] for group in archive_groups) != ["dog", "lafan1"]):
-        raise ValueError("Reference PAN requires exactly one lafan1 and one dog archive domain; no raw mixing")
+    if any("human_reference_style" in group for group in dataset_cfg.values()):
+        from .human_reference import load_human_reference_splits
+
+        if len(dataset_cfg) != 2 or any(set(group) != {"human_reference_style"} for group in dataset_cfg.values()):
+            raise ValueError("human_reference_style requires two explicit domains without generic/archive mixing")
+        profiles = [group["human_reference_style"] for group in dataset_cfg.values()]
+        if sorted(profile["source"] for profile in profiles) != ["amass", "cmu"]:
+            raise ValueError("human_reference_style requires one AMASS and one CMU source")
+        if set(profiles[0]["test_subjects"]) != set(profiles[1]["test_subjects"]):
+            raise ValueError("CMU-derived domains must use the same held-out subjects to avoid cross-domain leakage")
+        for name, group in dataset_cfg.items():
+            train_datasets[name], holdout_datasets[name] = load_human_reference_splits(**group["human_reference_style"])
+        return train_datasets, holdout_datasets
+    dataset_cfg = dict(dataset_cfg)
+    for name, group in dataset_cfg.items():
+        sources = group.get("sources", [])
+        if any(source in PARTS for source in sources):
+            if len(sources) != 1 or set(group) - {"sources", "params"}:
+                raise ValueError("LAFAN1/Dog sources cannot be combined with other sources or reference options")
+            fixed = {"sequence_length": 64, "stride": 20, "target_fps": 30}
+            if any(key not in fixed or value != fixed[key] for key, value in (group.get("params") or {}).items()):
+                raise ValueError("LAFAN1/Dog use fixed 64/20/30 preprocessing and explicit reference splits; "
+                                 "remove holdout/cap params or use reference_archive")
+            dataset_cfg[name] = {"reference_raw": {"kind": sources[0]}}
+    reference_groups = []
+    for group in dataset_cfg.values():
+        keys = set(group) & {"reference_archive", "reference_raw"}
+        if keys:
+            if len(keys) != 1 or set(group) != keys:
+                raise ValueError("reference_archive/reference_raw cannot be combined with raw sources/params")
+            reference_groups.append(group[next(iter(keys))])
+    if reference_groups and (len(dataset_cfg) != 2 or len(reference_groups) != 2 or
+                              sorted(group["kind"] for group in reference_groups) != ["dog", "lafan1"]):
+        raise ValueError("Reference PAN requires exactly one lafan1 and one dog domain; no raw mixing with generic sources")
     for name, group_cfg in dataset_cfg.items():
-        if "reference_archive" in group_cfg:
-            if set(group_cfg) != {"reference_archive"}:
-                raise ValueError("reference_archive cannot be combined with raw sources/params")
-            archive = group_cfg["reference_archive"]
-            train_datasets[name], holdout_datasets[name] = load_reference_splits(**archive)
+        if "reference_archive" in group_cfg or "reference_raw" in group_cfg:
+            key = "reference_archive" if "reference_archive" in group_cfg else "reference_raw"
+            loader = load_reference_splits if key == "reference_archive" else load_raw_reference_splits
+            train_datasets[name], holdout_datasets[name] = loader(**group_cfg[key])
             continue
         config = PANDataConfig(**(group_cfg.get("params") or {}))
         collections = [build_adapter(source).load() for source in group_cfg["sources"]]

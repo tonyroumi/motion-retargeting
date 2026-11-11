@@ -14,14 +14,17 @@ def discriminator_loss(real_scores: torch.Tensor, fake_scores: torch.Tensor) -> 
     return 0.5 * (real_loss + fake_loss)
 
 
-def mapped_root_velocity(velocity: torch.Tensor, minimum: float, maximum: float) -> torch.Tensor:
+def mapped_root_velocity(velocity: torch.Tensor, minimum: float, maximum: float, zero_safe: bool = False) -> torch.Tensor:
     """Reference speed-range mapping, preserving direction (no clamp/extrapolation limit).
 
     Zero speed is undefined in the reference; preserve that singularity rather than
     silently change the objective. The training finite-loss check rejects it.
+    The explicitly experimental human protocol maps exact zero to zero instead;
+    all nonzero speeds still use the reference formula (no epsilon/clamping).
     """
     speed = torch.linalg.vector_norm(velocity, dim=-1, keepdim=True)
-    return ((speed - minimum) / (maximum - minimum)) * velocity / speed
+    denominator = torch.where(speed == 0, torch.ones_like(speed), speed) if zero_safe else speed
+    return ((speed - minimum) / (maximum - minimum)) * velocity / denominator
 
 
 def end_effector_terms(
