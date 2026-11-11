@@ -12,7 +12,7 @@ This installs the `motion_retargeting` package (from `src/`) in editable mode.
 
 ```bash
 python scripts/train.py source=<character> target=<character>
-python scripts/retarget.py --model <checkpoint> --source-skeleton <path> --target-skeleton <path> --motion <path>
+python scripts/retarget.py --config <training config> --checkpoint <checkpoint> --output-dir <dir>
 ```
 
 ## PAN
@@ -45,6 +45,22 @@ default, uses every window; a cap at or above the split's size changes nothing. 
 and per-bank statistics are still built from the whole domain, so validation stays comparable across caps.
 Each epoch draws as many samples from every domain as the smallest training set holds, so capping one
 domain also shortens epochs for the others.
+
+To retarget with a trained checkpoint, in both directions by default:
+
+```bash
+python scripts/retarget.py --config configs/methods/pan.yaml --checkpoint <run>/checkpoints/final.pt \
+    --output-dir outputs/retarget [--source group_a] [--target-bank 0] [--index 0] [--clip]
+```
+
+`--config` must window the data as the training run did; a checkpoint whose skeleton banks or statistics
+differ is refused. The source is a holdout window (`--index`, `--split train` for the training split) or, with
+`--clip`, a whole adapter clip, run in one pass. The target skeleton is bank `--target-bank` of the other group.
+Each direction writes, in this order, `<source>_to_<target>/00_original_<source>.npz` and then
+`01_retargeted_<target>.npz`, and never overwrites. Each holds world joint positions from the model's FK (root
+integrated from the origin), local quaternions (w, x, y, z), root velocity, the denormalized channels, offsets and
+fps, in the units the checkpoint declares (`checkpoint_physical_units`). See the script's docstring for every
+array. Reference archives hold only windows, in centimetres, with heading removed and End Sites included.
 
 ### What it does not reproduce
 
