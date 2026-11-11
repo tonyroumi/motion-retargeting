@@ -7,14 +7,58 @@ reference `humtrain.npz`, `humtest.npz`, `humstats.npz`, `dogtrain.npz`,
 do not use untrusted files. There is no runtime dependency on the reference source tree.
 
 This is a bounded compatibility path, **not a full reproduction or a convergence
-claim**. Existing `configs/methods/pan.yaml`, raw adapters/caches, and AMASS/CMU
-behavior are unchanged. Do not mix raw sources/params with `reference_archive`.
-Exactly one `lafan1` archive domain and one `dog` archive domain are required;
-domain group names can be arbitrary. No raw-data directory renaming is necessary.
+claim**. Exactly one `lafan1` domain and one `dog` domain are required; group names
+can be arbitrary. Do not combine sources/params with a `reference_archive` or
+`reference_raw` block. No raw-data directory renaming is necessary.
+
+## Raw data and adapter selection
+
+`configs/methods/pan_lafan_dog_raw.yaml` uses `sources: [lafan1]` and
+`sources: [dog]`. PAN routes these adapters through the reference preprocessing
+path, **not** the generic MotionCollection builder. It reads `data/raw/lafan1` and
+`data/raw/dog`, falling back to existing `LAFAN1` / `Dog` folders. To read another
+location without copying data, replace a group's `sources` with:
+
+```yaml
+reference_raw:
+  kind: lafan1  # dog for the other domain
+  directory: /path/to/LAFAN1
+```
+
+Raw loading uses the published train/test manifests included in
+`data/adapters/lafan1_splits.py`: 17/6 human clips and 38/13 dog clips. Extra clips
+are ignored; missing or duplicate stems fail. No arbitrary last-5% holdout, caps,
+resampling overrides, or alternate windows are silently applied. The only
+accepted `sources` params are the fixed `sequence_length: 64`, `stride: 20`, and
+`target_fps: 30`; omit params entirely for the same behavior.
+
+The precision-preserving BVH reader keeps float64 original-frame cm coordinates
+and End Sites, verifies the reference names/topology across clips and 30/60 Hz
+source rates, and selects dog frames 0,2,4,... . Non-root translation or differing
+rotation orders are rejected, not approximated. Raw loading applies the same
+per-window canonicalization and normalization policy described below. Statistics
+are regenerated across **train plus test**, with population std and exact-zero-only
+replacement, and shared by all skeleton banks. Subjects, not tiny per-clip offset
+roundoff, define banks (5 human / 1 dog on the available corpus).
+
+Raw enumeration is sorted; upstream used filesystem-dependent `os.listdir` order.
+Both choose the first clip's skeleton per subject per split, so tiny within-subject
+BVH offset differences can select a slightly different skeleton. In numerical
+checks on the available corpus, mean/std errors were below 2.2e-13, 100 sampled
+normalized windows differed by at most 2.4e-7, and skeleton differences were below
+5.5e-5 cm. These are sampled input checks, not a training-convergence claim. Use
+**reference_archive** for exact historical window order, skeleton choices and saved
+statistics. The raw path never reads or writes MotionCollection caches; parsing
+runs again on each load. Its regenerated-statistics fingerprint distinguishes its
+checkpoints from archive checkpoints.
+
+Outside PAN, generic LAFAN1/Dog adapters retain their rebased metre MotionCollection
+contract and now select only the exact training manifests. Their versioned cache
+names avoid reusing older all-clips caches.
 
 ## Data contract
 
-- Explicit archive train/test sets (6566/2074 human, 2769/779 dog in the shipped
+- Explicit train/test sets (6566/2074 human, 2769/779 dog in the shipped
   reference), 64 frames at 30 Hz. No percent holdout or window cap on this path.
 - Original BVH local frames and **centimetres**, not the generic adapters' rebased
   metre frames. The network retains 22/21 rotation joints (92/88 channels).
@@ -42,8 +86,8 @@ frames/cm. Human heading is original-root +Y projected onto XZ; dog heading is
 root-to-joint-2 direction, normalized, Gaussian-smoothed (sigma 8, nearest padding)
 **within the window**, then normalized again. Both face canonical +Z. Heading is
 removed from global rotations before converting back to local rotations; root
-lookahead displacement is rotated by the inverse current heading. These helpers
-do not regenerate/load raw datasets or repair generic adapter caches.
+lookahead displacement is rotated by the inverse current heading. The raw loader
+uses these helpers after precision-preserving BVH parsing, before any FP32 cast.
 
 ## Objective and routes
 
@@ -101,7 +145,7 @@ Optional differential checks (read-only external inputs):
 PAN_REFERENCE_ROOT=/path/to/pan-motion-retargeting \
 PAN_REFERENCE_BVH_ROOT=/path/to/motion-retargeting/data/raw \
 PYTHONDONTWRITEBYTECODE=1 CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 \
-pytest tests/test_pan_reference.py
+pytest tests/test_pan_reference.py tests/test_adapter_preprocessing.py
 ```
 
 They check real archive channels/normalization exactly, full End Site FK and its
@@ -113,12 +157,45 @@ parity. This is not full learned-checkpoint forward/update parity.
 
 Still unmatched/out of scope: the trainer's min-domain sampler/partial batches
 versus human-driven dog recycling/drop-last; historical RNG/initialization and
-optimizer-step exposure; full pretrained weight import; raw-cache rebuilding;
+optimizer-step exposure; full pretrained weight import;
 full-clip heading restoration/export/IK cleanup; convergence and visual quality.
 The skeleton encoder still stores a masked zero root-offset input column, so its
 parameter shape/initialization differs from the reference. The example learning
 rate/batch/epoch targets do not make the unchanged sampler a schedule reproduction.
 No full training or Isaac Lab run is needed or performed for these checks.
+
+## Generic units, caches, and unsupported equivalence
+
+All generic MotionCollections use **metres** for both offsets and root translation.
+AMASS no longer multiplies metre SMPL offsets by 100 while leaving translation in
+metres. CMU converts both ASF lengths and AMC translations using 0.0254 metres per
+inch (including the ASF length-unit divisor). BANDAI, Mixamo and generic LAFAN1/Dog
+already convert cm to metres and keep that contract. Reference PAN tensors alone
+use original-frame cm, bypassing generic conversions.
+
+AMASS/CMU now use `amass.metres-v2.pt` / `cmu.metres-v2.pt`; generic LAFAN1/Dog use
+`*.reference-split-metres-v2.pt`. Old `.pt` files are preserved and never rescaled,
+overwritten, or reused by these adapters. Fresh extraction can require the usual
+body-part labeling. Generic PAN checkpoint metadata now fingerprints skeletons
+and statistics: older checkpoints without those hashes are rejected rather than
+restoring cm/mixed-unit banks under a metre label. Retrain with consistent units;
+do not relabel or blindly rescale a historical checkpoint. AMASS extraction options
+(model type/beta count) and arbitrary raw-file edits still require deliberate cache
+management; these versioned names are not general content-addressed raw caches.
+
+Neither PAN reference pipeline defines an AMASS, ASF/AMC CMU, or BANDAI benchmark
+with matching splits/statistics/correspondences. They remain **generic experiments**,
+not reference-equivalent training setups. The existing `pan.yaml` still selects
+AMASS/CMU; its objectives and hyperparameters have not been re-tuned for these fixes.
+
+Mixamo reference preprocessing is **not** the LAFAN1/Dog contract: it uses parent
+rotations per edge plus absolute root XYZ (no yaw channel), [::2] subsampling,
+64/32 windows, per-character FP32 sample std before a final 5% holdout, and optional
+time reversal. Local Mixamo adapters still supply joint rotations in metre
+MotionCollections to generic PAN, not that reference edge/absolute-position model.
+A separate Mixamo model path is intentionally not implemented. Only synthetic
+Mixamo adapter fixtures were tested because no real Mixamo corpus was available.
+No adapter selection alone promises identical training results.
 
 Known pre-existing regression issue: `tests/test_pan_root_loss.py` expects an
 integrated, height-normalized legacy root loss, but that term is already absent

@@ -1,0 +1,45 @@
+# Reference preprocessing from the published raw BVH splits (no generic .pt cache).
+# Not a full sampler/schedule or convergence reproduction; see docs/pan_lafan_dog_reference.md.
+device: cpu
+
+dataset:
+  group_a:
+    sources: [lafan1]  # data/raw/lafan1 or existing data/raw/LAFAN1
+  group_b:
+    sources: [dog]     # data/raw/dog or existing data/raw/Dog
+
+method:
+  name: pan
+  model:
+    motion_encoder:
+      embed_dim: 32
+      embed_hidden_dim: 512
+      num_layers: 1
+      num_heads: 1
+      feedforward_dim: 256
+      dropout: 0.0
+      kernel_size: 15
+    motion_decoder:
+      kernel_size: 15
+      upsample_mode: linear
+    motion_discriminator:
+      hidden_dim: 256
+      kernel_size: 15
+  params:
+    reconstruction_lambda: 1
+    root_lambda: 100
+    position_lambda: 0.01
+    cycle_lambda: 0.001
+    adversarial_lambda: 1
+    root_velocity_lambda: 1000
+
+trainer:
+  batch_size: 128
+  learning_rate: 0.0001
+  num_epochs: 5001
+  log_interval: 10
+  validation_interval: 25
+  checkpoint_interval: 500
+  log_dir: logs/lafan_dog_raw
+  use_tensorboard: true
+  verbose: true

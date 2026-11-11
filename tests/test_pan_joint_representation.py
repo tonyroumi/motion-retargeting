@@ -95,6 +95,14 @@ def test_joint_pipeline_train_validation_and_checkpoint():
         assert all(math.isfinite(value) for value in method.validation_step(batch).values())
         checkpoint = method.state_dict()
         method.load_state_dict(checkpoint)
+        checkpoint["metadata"]["domains"]["a"].pop("skeleton_banks_sha256")
+        with pytest.raises(ValueError, match="domains"):
+            method.load_state_dict(checkpoint)  # legacy cm banks cannot masquerade as metres
+        checkpoint["metadata"] = method.checkpoint_metadata()
+        checkpoint["metadata"]["domains"]["a"]["statistics_sha256"] = "different units/statistics"
+        with pytest.raises(ValueError, match="domains"):
+            method.load_state_dict(checkpoint)
+        checkpoint["metadata"] = method.checkpoint_metadata()
         checkpoint["metadata"] = dict(checkpoint["metadata"], representation="edge_parent_quaternions_root_velocity_xyz_yaw")
         with pytest.raises(ValueError, match="representation"):
             method.load_state_dict(checkpoint)

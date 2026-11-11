@@ -1,7 +1,7 @@
 """Opt-in LAFAN1/Dog archive contract (original BVH frames, centimetres).
 
-No reference repository imports or raw-adapter/cache changes. Archive dictionaries are
-pickled NumPy objects: load only trusted reference archives.
+No reference repository imports. Archive loading never accesses raw-adapter caches.
+Archive dictionaries are pickled NumPy objects: load only trusted reference archives.
 """
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ class ReferenceData:
     min_velocity: float
     max_velocity: float
     statistics_sha256: str
+    statistics_source: str = "archive"
 
     @property
     def rotation_indices(self) -> list[int]:

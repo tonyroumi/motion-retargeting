@@ -375,11 +375,13 @@ class PANMethod(RetargetingMethod):
 
     def checkpoint_metadata(self) -> Dict[str, Any]:
         if self.model.is_reference:
+            regenerated = any(spec.reference.statistics_source == "raw" for spec in self.domain_specs.values())
             return {
-                "representation": "lafan1_dog_reference_archive_v1",
+                "representation": "lafan1_dog_reference_raw_v1" if regenerated else "lafan1_dog_reference_archive_v1",
                 "root_frame": "heading_removed_local_velocity_inclusive_sum",
                 "physical_units": "centimeters",
-                "normalization_scope": "saved_reference_train_and_test_domain_statistics",
+                "normalization_scope": ("reference_train_and_test_domain_statistics_with_raw_regeneration" if regenerated
+                                        else "saved_reference_train_and_test_domain_statistics"),
                 "routes": "cross_only_destination_batch_skeletons",
                 "discriminator": "raw_scores_all_integrated_positions_with_end_sites",
                 "domains": {
@@ -408,6 +410,12 @@ class PANMethod(RetargetingMethod):
                     "body_parts": spec.parts,
                     "num_skeleton_banks": spec.num_banks,
                     "end_effector_ids": spec.ee_ids,
+                    # Older generic checkpoints claimed metres even when their
+                    # AMASS/CMU banks were in cm. Do not silently restore those.
+                    "skeleton_banks_sha256": hashlib.sha256(spec.offsets.cpu().numpy().tobytes()).hexdigest(),
+                    "statistics_sha256": hashlib.sha256(
+                        spec.mean.cpu().numpy().tobytes() + spec.std.cpu().numpy().tobytes()
+                    ).hexdigest(),
                 }
                 for name, spec in self.domain_specs.items()
             },

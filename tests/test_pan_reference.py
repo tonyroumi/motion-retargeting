@@ -312,8 +312,13 @@ def test_raw_bvh_window_matches_shipped_archive(upstream, tmp_path, kind, folder
     anim = read_bvh(str(sliced), downsample_rate=2 if kind == "dog" else None)
     if kind == "dog":
         anim = anim[0]
-    actual, _ = preprocess_reference_window(torch.from_numpy(anim.quats), torch.from_numpy(anim.pos[:, 0]),
-                                            torch.from_numpy(anim.offsets), torch.from_numpy(anim.parents), kind)
+    from motion_retargeting.data.adapters.lafan1_bvh import read_lafan_reference_bvh
+    clip = read_lafan_reference_bvh(sliced)
+    step = 2 if kind == "dog" else 1
+    torch.testing.assert_close(clip.rotations[::step], torch.from_numpy(anim.quats), rtol=0, atol=0)
+    torch.testing.assert_close(clip.root_position[::step], torch.from_numpy(anim.pos[:, 0]), rtol=0, atol=0)
+    actual, _ = preprocess_reference_window(clip.rotations[::step], clip.root_position[::step],
+                                            clip.offsets, clip.parents, kind)
     prefix = "hum" if kind == "lafan1" else "dog"
     with np.load(upstream / f"data_preprocess/Lafan1_and_dog/{prefix}train.npz", allow_pickle=True) as archive:
         expected = reference_channels(torch.from_numpy(archive["Q"][index:index+1]),
